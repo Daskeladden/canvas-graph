@@ -115,6 +115,15 @@ saying how many more there are."
 the other nodes must, too."
   :type 'integer)
 
+(defcustom canvas-graph-group-colors
+  '("steel blue" "chocolate" "sea green" "medium purple" "indian red" "dark goldenrod" "teal")
+  "The colours of the frames round the groups that name no colour of
+their own, taken in the order of the groups and cycled."
+  :type '(repeat string))
+
+(defconst canvas-graph--frame-pad 8
+  "Pixels between a box and the frame round it.")
+
 (defconst canvas-graph--marker-gap 26
   "Pixels from the any-node marker's dot to the box it points at.")
 
@@ -174,8 +183,9 @@ has not, or labels shown in no way the setting knows, is an error."
                                  (:constructor canvas-graph-node-create))
   "A node: its ID, the name the spec knows it by, its label shown unless
 it has one of its own; its DEPTH, steps from the start node, nil when
-unreachable; the PARENT that first reaches it; its edges OUT and IN."
-  id depth parent out in)
+unreachable; the PARENT that first reaches it; its edges OUT and IN;
+the GROUP that holds it, or nil."
+  id depth parent out in group)
 
 (cl-defstruct (canvas-graph-edge (:constructor canvas-graph-edge-create))
   "An edge FROM a node TO a node, under any of its LABELS, first seen at
@@ -191,9 +201,23 @@ two boxes the arrow joins, when it joins rows rather than whole boxes."
 
 (cl-defstruct (canvas-graph (:constructor canvas-graph-create))
   "A graph: its NAME and TYPE, its NODES in declaration order, the START
-node among them, its EDGES in the spec's order, and the STYLE its
-reader speaks in."
-  name type nodes start edges style)
+node among them, its EDGES in the spec's order, the STYLE its reader
+speaks in, and its GROUPS of nodes in the spec's order.  The layout
+sets the FRAMES round the parts of the groups, and TITLE-H, the height
+of their titles."
+  name type nodes start edges style groups frames (title-h 0))
+
+(cl-defstruct (canvas-graph-group (:constructor canvas-graph-group-create))
+  "A group of nodes: its ID, the name the spec knows it by, the TITLE its
+frames show, the STROKE their outline is drawn in and the FILL behind
+them, (R G B) each, FILL nil for none, and its NODES."
+  id title stroke fill nodes)
+
+(cl-defstruct (canvas-graph-frame (:constructor canvas-graph-frame-create))
+  "A frame round a part of a GROUP: the NODES it holds, the TITLE it
+shows, the title of the group or as much of its start as has room, and
+TITLE-W, the width of that title.  The layout sets the title."
+  group nodes title (title-w 0))
 
 (defun canvas-graph-node-named (graph name)
   "The node of GRAPH its spec calls NAME, or nil."
@@ -209,7 +233,7 @@ reader speaks in."
 
 ;;;; Building the graph
 
-(defconst canvas-graph--spec-keys '(:name :type :start :nodes :edges :data)
+(defconst canvas-graph--spec-keys '(:name :type :start :nodes :edges :groups :data)
   "What a spec may say.  :data is its reader's own, kept with the spec for
 the reader's callbacks and let be here.")
 
@@ -274,6 +298,45 @@ row at all."
       (error "canvas-graph: %s holds no row %S" (canvas-graph-node-id node) row))
     row))
 
+(defconst canvas-graph--group-keys '(:title :stroke :fill :nodes)
+  "What a group of a spec may say.")
+
+(defun canvas-graph--colour (name)
+  "(R G B) of the colour NAME; a name that is no colour is an error."
+  (or (canvas-diagram-rgb name)
+      (error "canvas-graph: %S is not a colour" name)))
+
+(defun canvas-graph--group-of (spec index nodes)
+  "The group SPEC describes among NODES, the INDEX-th group of its graph.
+SPEC is (ID [:title TITLE] [:stroke COLOUR] [:fill COLOUR] :nodes
+\(NAME...)): its frames show TITLE, else ID, are outlined in COLOUR,
+else the INDEX-th of `canvas-graph-group-colors', and have the :fill
+colour behind them, or nothing.  Another option, or a NAME of no node,
+is an error."
+  (pcase-let ((`(,id . ,options) spec))
+    (cl-loop for (key _) on options by #'cddr
+             unless (memq key canvas-graph--group-keys)
+             do (error "canvas-graph: group %s has no option %S" id key))
+    (canvas-graph-group-create
+     :id id :title (or (plist-get options :title) id)
+     :stroke (canvas-graph--colour
+              (or (plist-get options :stroke)
+                  (nth (mod index (length canvas-graph-group-colors)) canvas-graph-group-colors)))
+     :fill (and (plist-get options :fill) (canvas-graph--colour (plist-get options :fill)))
+     :nodes (mapcar (lambda (name) (canvas-graph--named-in nodes name)) (plist-get options :nodes)))))
+
+(defun canvas-graph--groups (specs nodes)
+  "The groups SPECS describe among NODES, each node told the group that
+holds it; a node in two groups is an error."
+  (let ((groups (cl-loop for spec in specs for i from 0 collect (canvas-graph--group-of spec i nodes))))
+    (dolist (group groups)
+      (dolist (node (canvas-graph-group-nodes group))
+        (when-let* ((other (canvas-graph-node-group node)))
+          (error "canvas-graph: %s is in %s and in %s" (canvas-graph-node-id node)
+                 (canvas-graph-group-id other) (canvas-graph-group-id group)))
+        (setf (canvas-graph-node-group node) group)))
+    groups))
+
 (defun canvas-graph--connect (edges)
   "Tell each node of EDGES which edges leave it and which arrive."
   (dolist (edge edges)
@@ -319,22 +382,25 @@ from any node leads to is one step away."
 (defun canvas-graph-build (spec &optional style)
   "The graph SPEC describes, speaking STYLE, measured from its start node.
 SPEC is (:name NAME [:type TYPE] [:start NODE] :nodes ((NODE [:label
-LABEL] [:pos POS])...) :edges ((FROM TO [LABEL [POS]])...)): a node is
-known by its name, NODE, and shows LABEL when it has one; FROM nil is
-any node, and without a start the first node is.  A reader may add
-:data, anything of its own for its callbacks, which the graph lets be.
-STYLE is a plist of the keys `canvas-graph--default-style' has, the
-reader's own for them."
+LABEL] [:pos POS])...) :edges ((FROM TO [LABEL [POS]])...) [:groups
+GROUPS]): a node is known by its name, NODE, and shows LABEL when it
+has one; FROM nil is any node, and without a start the first node is.
+GROUPS are the groups of nodes framed together, as
+`canvas-graph--group-of' reads them.  A reader may add :data, anything
+of its own for its callbacks, which the graph lets be.  STYLE is a
+plist of the keys `canvas-graph--default-style' has, the reader's own
+for them."
   (canvas-graph--check-spec spec)
   (let* ((style (append (canvas-graph--check-style style) canvas-graph--default-style))
          (nodes (mapcar #'canvas-graph--node-of (plist-get spec :nodes)))
          (edges (canvas-graph--edges nodes (plist-get spec :edges)))
+         (groups (canvas-graph--groups (plist-get spec :groups) nodes))
          (start (canvas-graph--start-of spec nodes)))
     (canvas-graph--connect edges)
     (canvas-graph--measure-depths start edges)
     (canvas-graph--mark-kinds nodes start (plist-get style :start))
     (canvas-graph-create :name (plist-get spec :name) :type (plist-get spec :type)
-                         :nodes nodes :start start :edges edges :style style)))
+                         :nodes nodes :start start :edges edges :style style :groups groups)))
 
 ;;;; Writing a spec down
 
@@ -506,11 +572,28 @@ fewer arrows cross; ties keep declaration order."
                              (canvas-graph--barycentre b previous))))
     row))
 
+(defun canvas-graph--grouped-row (row)
+  "ROW with the boxes of each group side by side where the first of them
+stood; a box of no group keeps its place among the groups."
+  (let (out)
+    (dolist (node row)
+      (let ((group (canvas-graph-node-group node)))
+        (cond ((null group) (push node out))
+              ((not (cl-find group out :key #'canvas-graph-node-group))
+               (dolist (member (canvas-graph--in-group group row))
+                 (push member out))))))
+    (nreverse out)))
+
+(defun canvas-graph--in-group (group nodes)
+  "The nodes of NODES that GROUP holds."
+  (cl-remove-if-not (lambda (node) (eq (canvas-graph-node-group node) group)) nodes))
+
 (defun canvas-graph--ordered-rows (nodes)
-  "The rows of NODES, top down, each ordered under the row above."
+  "The rows of NODES, top down, each ordered under the row above, the
+boxes of a group side by side."
   (let (rows previous)
     (dolist (row (canvas-graph--layers nodes))
-      (let ((ordered (canvas-graph--order-row row previous)))
+      (let ((ordered (canvas-graph--grouped-row (canvas-graph--order-row row previous))))
         (push ordered rows)
         (setq previous ordered)))
     (nreverse rows)))
@@ -649,16 +732,148 @@ side in the gap."
              do (let ((tallest (canvas-graph--place-row row y widest row-gaps)))
                   (canvas-graph--place-row-labels row graph label-size)
                   (when next
-                    (let* ((bottom (+ y tallest))
-                           (next-y (+ bottom (canvas-graph--row-gap row next gap-y graph label-size))))
+                    (pcase-let* ((bottom (+ y tallest))
+                                 (`(,below . ,above) (canvas-graph--frame-room row next graph))
+                                 (next-y (+ bottom below above
+                                            (canvas-graph--row-gap row next gap-y graph label-size))))
                       ;; The next row's boxes must stand before the arrows to them bend.
                       (canvas-graph--place-row next next-y widest next-gaps)
-                      ;; The labels between the rows keep clear of those on the rows.
+                      ;; The labels between the rows keep clear of those on the rows,
+                      ;; and of the frames.
                       (canvas-graph--place-gap-labels row next
-                                                      (+ bottom (canvas-graph--overhang row graph label-size))
-                                                      (- next-y (canvas-graph--overhang next graph label-size))
+                                                      (+ bottom below (canvas-graph--overhang row graph label-size))
+                                                      (- next-y above (canvas-graph--overhang next graph label-size))
                                                       graph label-size)
                       (setq y next-y)))))))
+
+;;;;; Frames round the groups
+
+(defun canvas-graph--span (nodes)
+  "The left and the right of a frame round the boxes of NODES, (LEFT . RIGHT)."
+  (cons (- (apply #'min (mapcar #'canvas-diagram-node-x nodes)) canvas-graph--frame-pad)
+        (+ (apply #'max (mapcar (lambda (n) (+ (canvas-diagram-node-x n) (canvas-diagram-node-w n))) nodes))
+           canvas-graph--frame-pad)))
+
+(defun canvas-graph--frame-fits-p (nodes rows group)
+  "Whether a frame round NODES, in ROWS, reaches no box of ROWS that GROUP
+does not hold.  Rows stand further apart than a frame reaches, so only
+the boxes of ROWS can be in its way."
+  (pcase-let ((`(,left . ,right) (canvas-graph--span nodes)))
+    (cl-notany (lambda (node)
+                 (and (not (eq (canvas-graph-node-group node) group))
+                      (< left (+ (canvas-diagram-node-x node) (canvas-diagram-node-w node)))
+                      (> right (canvas-diagram-node-x node))))
+               (apply #'append rows))))
+
+(defun canvas-graph--group-parts (group rows)
+  "The parts of GROUP in ROWS, top down, each the boxes it holds in rows
+one after the other, and as many rows as a frame round them can take
+without reaching a box of another group or of none."
+  (let (parts part part-rows)
+    (dolist (row rows)
+      (let ((members (canvas-graph--in-group group row)))
+        (cond ((null members)
+               (when part (push part parts))
+               (setq part nil part-rows nil))
+              ((and part (canvas-graph--frame-fits-p (append part members) (cons row part-rows) group))
+               (setq part (append part members) part-rows (cons row part-rows)))
+              (t
+               (when part (push part parts))
+               (setq part members part-rows (list row))))))
+    (when part (push part parts))
+    (nreverse parts)))
+
+(defun canvas-graph--row-frames (graph rows)
+  "The frames round the parts of GRAPH's groups in ROWS."
+  (cl-loop for group in (canvas-graph-groups graph)
+           append (mapcar (lambda (part) (canvas-graph-frame-create :group group :nodes part))
+                          (canvas-graph--group-parts group rows))))
+
+(defun canvas-graph--box-frames (graph)
+  "A frame round each box of GRAPH's groups, for a layout with no rows to
+keep the boxes of a group together."
+  (cl-loop for group in (canvas-graph-groups graph)
+           append (mapcar (lambda (node) (canvas-graph-frame-create :group group :nodes (list node)))
+                          (canvas-graph-group-nodes group))))
+
+(defun canvas-graph--frame-room (row next graph)
+  "The room the frames of GRAPH need between ROW and NEXT, (BELOW .
+ABOVE): BELOW under a frame that ends at ROW, ABOVE over a frame and its
+title that start at NEXT, 0 for none."
+  (let (ends starts)
+    (dolist (frame (canvas-graph-frames graph))
+      (let* ((nodes (canvas-graph-frame-nodes frame))
+             (in-row (cl-intersection nodes row))
+             (in-next (cl-intersection nodes next)))
+        (when (and in-row (not in-next)) (setq ends t))
+        (when (and in-next (not in-row)) (setq starts t))))
+    (cons (if ends canvas-graph--frame-pad 0)
+          (if starts (+ canvas-graph--frame-pad (canvas-graph-title-h graph)) 0))))
+
+(defun canvas-graph--frame-rect (frame graph)
+  "FRAME's rect, (X Y W H), round its boxes, with room above them for the
+title of its group, the height of GRAPH's titles, and as wide as the title."
+  (pcase-let* ((nodes (canvas-graph-frame-nodes frame))
+               (`(,left . ,right) (canvas-graph--span nodes))
+               (top (- (apply #'min (mapcar #'canvas-diagram-node-y nodes))
+                       canvas-graph--frame-pad (canvas-graph-title-h graph)))
+               (bottom (+ (apply #'max (mapcar (lambda (n) (+ (canvas-diagram-node-y n) (canvas-diagram-node-h n)))
+                                               nodes))
+                          canvas-graph--frame-pad)))
+    (list left top
+          (max (- right left) (+ (canvas-graph-frame-title-w frame) (* 2 canvas-graph--frame-pad)))
+          (- bottom top))))
+
+(defun canvas-graph--title-room (frame rows)
+  "The width FRAME can take for its title: up to the nearest box to the
+right of its own boxes in the ROWS it holds, with room for the frame of
+that box; nil when no box stands there."
+  (pcase-let* ((nodes (canvas-graph-frame-nodes frame))
+               (`(,left . ,right) (canvas-graph--span nodes))
+               (others (cl-loop for row in rows
+                                when (cl-intersection row nodes)
+                                append (cl-remove-if (lambda (node) (or (memq node nodes)
+                                                                        (< (canvas-diagram-node-x node) right)))
+                                                     row))))
+    (when others
+      (- (apply #'min (mapcar #'canvas-diagram-node-x others)) (* 2 canvas-graph--frame-pad) left))))
+
+(defun canvas-graph--fitted-title (ctx text width font)
+  "TEXT if it fits WIDTH pixels on CTX in FONT, else as much of its start
+as fits with an ellipsis after it."
+  (if (<= (car (canvas-cairo-text-size ctx text font)) width)
+      text
+    (cl-loop for n downfrom (1- (length text)) to 0
+             for shown = (concat (string-trim-right (substring text 0 n)) "…")
+             when (or (zerop n) (<= (car (canvas-cairo-text-size ctx shown font)) width))
+             return shown)))
+
+(defun canvas-graph--title-frame (frame rows ctx font)
+  "Give FRAME the title of its group, measured on CTX in FONT, as wide as
+the frame can grow for it in ROWS without reaching another box."
+  (pcase-let* ((pad canvas-graph--frame-pad)
+               (title (canvas-graph-group-title (canvas-graph-frame-group frame)))
+               (`(,left . ,right) (canvas-graph--span (canvas-graph-frame-nodes frame)))
+               (wanted (+ (car (canvas-cairo-text-size ctx title font)) (* 2 pad)))
+               (room (and rows (canvas-graph--title-room frame rows)))
+               (width (max (- right left) (if room (min wanted room) wanted)))
+               (shown (canvas-graph--fitted-title ctx title (- width (* 2 pad)) font)))
+    (setf (canvas-graph-frame-title frame) shown
+          (canvas-graph-frame-title-w frame) (car (canvas-cairo-text-size ctx shown font)))))
+
+(defun canvas-graph--frame-groups (graph rows ctx)
+  "Frame the parts of GRAPH's groups in ROWS, or each box of a group when
+there are no rows, title the frames as measured on CTX, and place ROWS
+again with room for the frames between them."
+  (let ((font (canvas-diagram-font)))
+    (setf (canvas-graph-title-h graph) (cdr (canvas-cairo-text-size ctx "Ag" font))
+          (canvas-graph-frames graph) (if rows
+                                          (canvas-graph--row-frames graph rows)
+                                        (canvas-graph--box-frames graph)))
+    (dolist (frame (canvas-graph-frames graph))
+      (canvas-graph--title-frame frame rows ctx font))
+    (when rows
+      (canvas-graph--place-boxes graph rows ctx))))
 
 (defun canvas-graph--two-way-p (edge)
   "Whether another drawn edge runs back the way EDGE runs."
@@ -743,10 +958,13 @@ just enough to clear it."
 
 (defun canvas-graph--drawn-points (graph ctx)
   "Points of everything drawn for GRAPH besides its boxes: the arrows,
-the any-node markers, the corners of the labels when shown, and the
-ways round the boxes a selected node's folded edges take."
+the any-node markers, the corners of the labels when shown, the ways
+round the boxes a selected node's folded edges take, and the corners of
+the frames round its groups."
   (let ((font (canvas-diagram-font)))
     (append
+     (cl-loop for frame in (canvas-graph-frames graph)
+              append (canvas-graph--rect-corners (canvas-graph--frame-rect frame graph)))
      (cl-loop for edge in (canvas-graph-edges graph)
               when (canvas-graph--drawn-p edge)
               append (canvas-graph--curve-points edge)
@@ -818,7 +1036,9 @@ FONT, or nil when it has none or labels are not laid out."
       (canvas-graph--label-size ctx graph text font))))
 
 (defun canvas-graph--forget-placing (graph)
-  "Take away every label, bend and route GRAPH's last layout gave its edges."
+  "Take away every label, bend and route GRAPH's last layout gave its
+edges, and the frames it put round its groups."
+  (setf (canvas-graph-frames graph) nil)
   (dolist (edge (canvas-graph-edges graph))
     (setf (canvas-graph-edge-label-rect edge) nil
           (canvas-graph-edge-control edge) nil
@@ -845,6 +1065,8 @@ reach past the boxes, and no more."
     (dolist (node nodes)
       (canvas-diagram-size-node diagram node measure))
     (canvas-graph--place-boxes graph rows ctx)
+    (when (canvas-graph-groups graph)
+      (canvas-graph--frame-groups graph rows ctx))
     (canvas-graph--choose-bows graph)
     (canvas-graph--place-labels graph ctx (canvas-diagram-font))
     (canvas-graph--route-folded graph)
@@ -1561,12 +1783,46 @@ labels are shown."
       (canvas-graph--draw-patch ctx graph (canvas-graph--marker-label-rect ctx graph group i font)
                                 (canvas-graph--marker-label graph group) font))))
 
+(defun canvas-graph--draw-frame (ctx frame graph)
+  "Draw FRAME of GRAPH on CTX: the background of its group, if it has
+one, and the outline in the group's colour."
+  (pcase-let* ((group (canvas-graph-frame-group frame))
+               (`(,x ,y ,w ,h) (canvas-graph--frame-rect frame graph))
+               (pad canvas-graph--frame-pad))
+    (when-let* ((fill (canvas-graph-group-fill group)))
+      (canvas-diagram-rounded-rect ctx x y w h pad)
+      (canvas-diagram-set-rgb ctx fill)
+      (canvas-cairo-fill ctx))
+    (canvas-diagram-rounded-rect ctx x y w h pad)
+    (canvas-diagram-set-rgb ctx (canvas-graph-group-stroke group))
+    ;; Two pixels wide covers a whole pixel wherever the frame falls.
+    (canvas-cairo-set-line-width ctx 2)
+    (canvas-cairo-stroke ctx)))
+
+(defun canvas-graph--draw-frame-title (ctx frame graph font)
+  "Write the title of FRAME at its top on CTX in FONT, on a patch of the
+frame's background, so no arrow runs through the words."
+  (pcase-let* ((group (canvas-graph-frame-group frame))
+               (`(,x ,y ,_ ,_) (canvas-graph--frame-rect frame graph))
+               (pad canvas-graph--frame-pad)
+               (text-x (+ x pad))
+               (text-y (+ y (/ pad 2.0))))
+    (canvas-cairo-rectangle ctx (- text-x 2) text-y (+ (canvas-graph-frame-title-w frame) 4)
+                            (canvas-graph-title-h graph))
+    (canvas-diagram-set-rgb ctx (or (canvas-graph-group-fill group) (canvas-diagram-color :background)))
+    (canvas-cairo-fill ctx)
+    (canvas-diagram-set-rgb ctx (canvas-diagram-color :text))
+    (canvas-cairo-text ctx text-x text-y (canvas-graph-frame-title frame) font)))
+
 (defun canvas-graph--draw-edges (diagram ctx)
-  "Draw every arrow of DIAGRAM's graph on CTX, then their labels, then the
-any-node markers."
+  "Draw the frames round the groups of DIAGRAM's graph on CTX, then every
+arrow, then their labels and the titles of the frames, then the any-node
+markers."
   (let* ((graph (canvas-diagram-model diagram))
          (font (canvas-diagram-font))
          (drawn (cl-remove-if-not #'canvas-graph--drawn-p (canvas-graph-edges graph))))
+    (dolist (frame (canvas-graph-frames graph))
+      (canvas-graph--draw-frame ctx frame graph))
     (canvas-diagram-set-rgb ctx (canvas-diagram-color :edge))
     (canvas-cairo-set-line-width ctx 1.5)
     (dolist (edge drawn)
@@ -1574,6 +1830,8 @@ any-node markers."
     (when (canvas-graph--all-labels-p graph)
       (dolist (edge drawn)
         (canvas-graph--draw-label ctx edge graph font)))
+    (dolist (frame (canvas-graph-frames graph))
+      (canvas-graph--draw-frame-title ctx frame graph font))
     (canvas-graph--draw-common ctx graph font)))
 
 ;;;; The selected node's ways, tagged and listed
@@ -1856,12 +2114,16 @@ colour when nothing reaches it."
     (n (format "%d steps" n))))
 
 (defun canvas-graph--legend-entries (graph)
-  "The legend's rows for GRAPH: a filled swatch per depth present."
+  "The legend's rows for GRAPH: a filled swatch per depth present, then
+an outline in the frame colour of each group, by its title."
   (let ((depths (sort (cl-remove-duplicates
                        (delq nil (mapcar #'canvas-graph-node-depth (canvas-graph-nodes graph))))
                       #'<)))
-    (mapcar (lambda (d) (list (canvas-graph--depth-label graph d) (canvas-diagram-palette-rgb d) 'fill))
-            depths)))
+    (append
+     (mapcar (lambda (d) (list (canvas-graph--depth-label graph d) (canvas-diagram-palette-rgb d) 'fill))
+             depths)
+     (mapcar (lambda (group) (list (canvas-graph-group-title group) (canvas-graph-group-stroke group) 'outline))
+             (canvas-graph-groups graph)))))
 
 (defun canvas-graph-header (graph node &optional place)
   "The header line of GRAPH on NODE: the graph, PLACE after its name when

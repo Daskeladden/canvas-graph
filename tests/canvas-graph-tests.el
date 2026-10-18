@@ -1508,4 +1508,295 @@ itself is painted."
   (should (equal (alist-get 'graph canvas-diagram-layouts)
                  '(:follow canvas-graph-follow :export canvas-graph-export))))
 
+;;;; Groups of boxes in frames
+
+(defun canvas-graph-test--grouped (nodes edges groups)
+  "A spec of NODES, names or (NAME [:label LABEL]) each, EDGES, (FROM TO
+[LABEL]) each, and GROUPS."
+  (list :name "graph" :nodes (mapcar (lambda (n) (if (consp n) n (list n))) nodes)
+        :edges edges :groups groups))
+
+(defun canvas-graph-test--frames-of (graph id)
+  "The frames of GRAPH's group ID, each as the names of its nodes."
+  (cl-loop for frame in (canvas-graph-frames graph)
+           when (equal (canvas-graph-group-id (canvas-graph-frame-group frame)) id)
+           collect (mapcar #'canvas-graph-node-id (canvas-graph-frame-nodes frame))))
+
+(defun canvas-graph-test--box (node)
+  "NODE's box, (X Y W H)."
+  (list (canvas-diagram-node-x node) (canvas-diagram-node-y node)
+        (canvas-diagram-node-w node) (canvas-diagram-node-h node)))
+
+(defun canvas-graph-test--holds-p (outer inner)
+  "Whether rect OUTER, (X Y W H), holds rect INNER whole, with room to spare."
+  (and (< (nth 0 outer) (nth 0 inner)) (< (nth 1 outer) (nth 1 inner))
+       (> (+ (nth 0 outer) (nth 2 outer)) (+ (nth 0 inner) (nth 2 inner)))
+       (> (+ (nth 1 outer) (nth 3 outer)) (+ (nth 1 inner) (nth 3 inner)))))
+
+(defun canvas-graph-test--frame-rects (graph)
+  "The rects of GRAPH's frames, (X Y W H) each."
+  (mapcar (lambda (frame) (canvas-graph--frame-rect frame graph)) (canvas-graph-frames graph)))
+
+(defun canvas-graph-test--frames-keep-to-their-boxes (graph)
+  "Check that each frame of GRAPH holds its own boxes and no other box,
+and that no two frames overlap."
+  (dolist (frame (canvas-graph-frames graph))
+    (let ((rect (canvas-graph--frame-rect frame graph)))
+      (dolist (node (canvas-graph-nodes graph))
+        (if (memq node (canvas-graph-frame-nodes frame))
+            (should (canvas-graph-test--holds-p rect (canvas-graph-test--box node)))
+          (should (canvas-graph-test--apart-p rect (canvas-graph-test--box node)))))))
+  (cl-loop for (a . rest) on (canvas-graph-test--frame-rects graph)
+           do (dolist (b rest) (should (canvas-graph-test--apart-p a b)))))
+
+(defun canvas-graph-test--ink-near-p (ctx x y rgb)
+  "Whether a pixel of CTX within one pixel of X Y is RGB, (R G B) each 0
+or 1, each channel within a quarter of full."
+  (cl-loop for px from (1- x) to (1+ x)
+           thereis (let ((argb (canvas-cairo-pixel ctx px y)))
+                     (cl-every (lambda (shift want) (< (abs (- (logand (ash argb shift) #xFF) (* want 255))) #x40))
+                               '(-16 -8 0) rgb))))
+
+(ert-deftest canvas-graph-a-group-names-its-boxes-its-title-and-its-colours ()
+  ;; GIVEN a spec with a group that gives its title, its frame colour and
+  ;;       its background, and a group that gives only its nodes
+  ;; WHEN it is built
+  ;; THEN each group holds its nodes, the first shows its own title and
+  ;;      colours, AND the second is titled by its name and framed in the
+  ;;      colour of its place in the list of frame colours, with no background
+  (let* ((canvas-graph-group-colors '("blue" "green"))
+         (graph (canvas-graph-build
+                 (canvas-graph-test--grouped
+                  '("S" "A" "B") '(("S" "A") ("A" "B"))
+                  '(("kitchen" :title "In the kitchen" :stroke "red" :fill "#ffeeee" :nodes ("S" "A"))
+                    ("counter" :nodes ("B"))))))
+         (kitchen (car (canvas-graph-groups graph)))
+         (counter (cadr (canvas-graph-groups graph))))
+    (should (equal (mapcar #'canvas-graph-node-id (canvas-graph-group-nodes kitchen)) '("S" "A")))
+    (should (equal (canvas-graph-group-title kitchen) "In the kitchen"))
+    (should (equal (canvas-graph-group-stroke kitchen) '(1.0 0.0 0.0)))
+    (should (equal (canvas-graph-group-fill kitchen) (canvas-diagram-rgb "#ffeeee")))
+    (should (equal (mapcar #'canvas-graph-node-id (canvas-graph-group-nodes counter)) '("B")))
+    (should (equal (canvas-graph-group-title counter) "counter"))
+    (should (equal (canvas-graph-group-stroke counter) '(0.0 1.0 0.0)))
+    (should-not (canvas-graph-group-fill counter))))
+
+(ert-deftest canvas-graph-a-group-that-cannot-be-drawn-is-an-error ()
+  ;; GIVEN groups that name a node the spec has not, give an option a group
+  ;;       has not, put one node in two groups, or name no colour
+  ;; WHEN each is built
+  ;; THEN each is an error that names what is wrong
+  (let ((message-of (lambda (groups)
+                      (error-message-string
+                       (should-error (canvas-graph-build
+                                      (canvas-graph-test--grouped '("A" "B") '(("A" "B")) groups)))))))
+    (should (string-search "no node X" (funcall message-of '(("g" :nodes ("X"))))))
+    (should (string-search ":colour" (funcall message-of '(("g" :colour "red" :nodes ("A"))))))
+    (should (string-search "A is in g and in h" (funcall message-of '(("g" :nodes ("A")) ("h" :nodes ("A"))))))
+    (should (string-search "nocolour" (funcall message-of '(("g" :stroke "nocolour" :nodes ("A"))))))))
+
+(ert-deftest canvas-graph-a-row-keeps-the-boxes-of-a-group-side-by-side ()
+  ;; GIVEN a start with three nodes below it, the first and the last of
+  ;;       them in one group
+  ;; WHEN it is laid out in layers
+  ;; THEN the two boxes of the group stand side by side where the first
+  ;;      stood, AND the box of no group stands after them
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 4 4
+     (let ((diagram (canvas-graph-test--laid-out
+                     (canvas-graph-test--grouped '("S" "A" "B" "C") '(("S" "A") ("S" "B") ("S" "C"))
+                                                 '(("g" :nodes ("A" "C"))))
+                     ctx)))
+       (should (equal (mapcar #'canvas-diagram-node-label (canvas-diagram-nodes diagram))
+                      '("S" "A" "C" "B")))))))
+
+(ert-deftest canvas-graph-a-group-gets-a-frame-round-each-part ()
+  ;; GIVEN a chain whose second and fourth nodes are in one group and whose
+  ;;       third node is in another, and a chain whose two nodes are in one
+  ;;       group
+  ;; WHEN each is laid out in layers
+  ;; THEN in the first, the group in two parts has a frame round each part,
+  ;;      the other group has one frame, each frame holds its own boxes and
+  ;;      no other box, and no two frames overlap, AND in the second, the two
+  ;;      boxes in rows one after the other share one frame
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 4 4
+     (let ((graph (canvas-diagram-model
+                   (canvas-graph-test--laid-out
+                    (canvas-graph-test--grouped '("S" "K1" "C" "K2") '(("S" "K1") ("K1" "C") ("C" "K2"))
+                                                '(("kitchen" :nodes ("K1" "K2")) ("counter" :nodes ("C"))))
+                    ctx))))
+       (should (equal (canvas-graph-test--frames-of graph "kitchen") '(("K1") ("K2"))))
+       (should (equal (canvas-graph-test--frames-of graph "counter") '(("C"))))
+       (canvas-graph-test--frames-keep-to-their-boxes graph))
+     (let ((graph (canvas-diagram-model
+                   (canvas-graph-test--laid-out
+                    (canvas-graph-test--grouped '("A" "B") '(("A" "B")) '(("g" :nodes ("A" "B"))))
+                    ctx))))
+       (should (equal (canvas-graph-test--frames-of graph "g") '(("A" "B"))))
+       (canvas-graph-test--frames-keep-to-their-boxes graph)))))
+
+(ert-deftest canvas-graph-a-frame-is-split-rather-than-hold-another-box ()
+  ;; GIVEN a box of a group beside a box of no group, and below them a box
+  ;;       of the group so wide that it reaches under both
+  ;; WHEN it is laid out in layers
+  ;; THEN the group has a frame for each of its two rows, since one frame
+  ;;      round both boxes would hold the box of no group
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 4 4
+     (let ((graph (canvas-diagram-model
+                   (canvas-graph-test--laid-out
+                    (canvas-graph-test--grouped
+                     '("S" "G1" "X" ("G2" :label "a box much wider than the two boxes above it"))
+                     '(("S" "G1") ("S" "X") ("G1" "G2"))
+                     '(("g" :nodes ("G1" "G2"))))
+                    ctx))))
+       (should (equal (canvas-graph-test--frames-of graph "g") '(("G1") ("G2"))))
+       (canvas-graph-test--frames-keep-to-their-boxes graph)))))
+
+(ert-deftest canvas-graph-rows-make-room-for-the-frames-and-the-labels-between-them ()
+  ;; GIVEN two boxes in two groups, joined by a labelled arrow, with the
+  ;;       labels shown
+  ;; WHEN they are laid out in layers
+  ;; THEN the label of the arrow lies clear of both frames, AND the rows
+  ;;      stand further apart than the same boxes with no groups
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 4 4
+     (let* ((canvas-graph-show-labels 'all)
+            (gap (lambda (graph)
+                   (let ((a (canvas-graph-node-named graph "A")) (b (canvas-graph-node-named graph "B")))
+                     (- (canvas-diagram-node-y b) (+ (canvas-diagram-node-y a) (canvas-diagram-node-h a))))))
+            (grouped (canvas-diagram-model
+                      (canvas-graph-test--laid-out
+                       (canvas-graph-test--grouped '("A" "B") '(("A" "B" "yes"))
+                                                   '(("kitchen" :nodes ("A")) ("counter" :nodes ("B"))))
+                       ctx)))
+            (plain (canvas-diagram-model
+                    (canvas-graph-test--laid-out (canvas-graph-test--spec '("A" "B") '(("A" "B" "yes"))) ctx)))
+            (label (canvas-graph-edge-label-rect (car (canvas-graph-edges grouped)))))
+       (dolist (rect (canvas-graph-test--frame-rects grouped))
+         (should (canvas-graph-test--apart-p rect label)))
+       (should (> (funcall gap grouped) (funcall gap plain)))))))
+
+(ert-deftest canvas-graph-a-frame-and-its-title-fit-the-drawing ()
+  ;; GIVEN one small box in a group whose title is far wider than the box
+  ;; WHEN it is laid out
+  ;; THEN the frame is wide enough for its title, AND the frame lies within
+  ;;      the drawing
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 4 4
+     (let* ((title "A title far wider than the box it frames")
+            (diagram (canvas-graph-test--laid-out
+                      (canvas-graph-test--grouped '("A") nil `(("g" :title ,title :nodes ("A"))))
+                      ctx))
+            (graph (canvas-diagram-model diagram))
+            (size (canvas-diagram--map-size diagram)))
+       (pcase-let ((`(,x ,y ,w ,h) (car (canvas-graph-test--frame-rects graph))))
+         (should (> w (car (canvas-cairo-text-size ctx title (canvas-diagram-font)))))
+         (should (>= x 0))
+         (should (>= y 0))
+         (should (<= (+ x w canvas-diagram-margin) (car size)))
+         (should (<= (+ y h canvas-diagram-margin) (cdr size))))))))
+
+(ert-deftest canvas-graph-a-title-with-no-room-beside-it-is-shortened ()
+  ;; GIVEN two small boxes side by side in one row, each in a group of its
+  ;;       own, the left one with a title far wider than its box
+  ;; WHEN they are laid out in layers
+  ;; THEN the two frames do not overlap and hold no box but their own, AND
+  ;;      the left frame shows the start of its title, ending in an ellipsis
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 4 4
+     (let* ((title "A title far wider than the box it frames")
+            (graph (canvas-diagram-model
+                    (canvas-graph-test--laid-out
+                     (canvas-graph-test--grouped '("S" "A" "B") '(("S" "A") ("S" "B"))
+                                                 `(("left" :title ,title :nodes ("A"))
+                                                   ("right" :nodes ("B"))))
+                     ctx)))
+            (left (car (canvas-graph-frames graph))))
+       (canvas-graph-test--frames-keep-to-their-boxes graph)
+       (let ((shown (canvas-graph-frame-title left)))
+         (should (string-suffix-p "…" shown))
+         (should (string-prefix-p (string-remove-suffix "…" shown) title))
+         (should (< (length shown) (length title))))))))
+
+(ert-deftest canvas-graph-render-draws-a-frame-in-its-colour-on-its-background ()
+  ;; GIVEN a box in a group with a frame colour and a background, above a
+  ;;       box in a group with no background
+  ;; WHEN the graph is rendered
+  ;; THEN both frames are drawn in their colour, the background of the
+  ;;      first fills the room between its frame and its box, AND the second
+  ;;      shows the canvas background there
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 400 300
+     (let* ((diagram (canvas-graph-test--laid-out
+                      (canvas-graph-test--grouped '("A" "B") '(("A" "B"))
+                                                  '(("g" :stroke "#ff00ff" :fill "#00ffff" :nodes ("A"))
+                                                    ("h" :stroke "#ff00ff" :nodes ("B"))))
+                      ctx))
+            (graph (canvas-diagram-model diagram))
+            (left-edge (lambda (frame) (+ 10 (round (nth 0 (canvas-graph--frame-rect frame graph))))))
+            (inside (lambda (frame) (+ 10 (floor (- (canvas-diagram-node-x (car (canvas-graph-frame-nodes frame))) 3)))))
+            (middle (lambda (frame) (+ 10 (round (canvas-diagram-middle-y (car (canvas-graph-frame-nodes frame))))))))
+       (canvas-diagram--render diagram ctx '(400 . 300))
+       (pcase-let ((`(,g ,h) (canvas-graph-frames graph)))
+         (should (canvas-graph-test--ink-near-p ctx (funcall left-edge g) (funcall middle g) '(1 0 1)))
+         (should (canvas-graph-test--ink-near-p ctx (funcall left-edge h) (funcall middle h) '(1 0 1)))
+         (should (= (canvas-cairo-pixel ctx (funcall inside g) (funcall middle g)) #xFF00FFFF))
+         (should (= (canvas-cairo-pixel ctx (funcall inside h) (funcall middle h)) #xFFFFFFFF)))))))
+
+(ert-deftest canvas-graph-the-title-of-a-frame-reads-over-an-arrow ()
+  ;; GIVEN a box above a small box in a group whose title is wider than
+  ;;       that box, so the arrow between them runs through the title
+  ;; WHEN the graph is rendered
+  ;; THEN the arrow shows above the frame, AND none of its ink shows where
+  ;;      it crosses the title
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 400 300
+     (let* ((diagram (canvas-graph-test--laid-out
+                      (canvas-graph-test--grouped '("A" "B") '(("A" "B"))
+                                                  '(("g" :title "A wide title" :nodes ("B"))))
+                      ctx))
+            (graph (canvas-diagram-model diagram))
+            (b (canvas-graph-node-named graph "B"))
+            (top (nth 1 (canvas-graph--frame-rect (car (canvas-graph-frames graph)) graph)))
+            (col (+ 10 (floor (canvas-diagram-middle-x b)))))
+       (canvas-diagram--render diagram ctx '(400 . 300))
+       (should (canvas-graph-test--reddish-p (canvas-cairo-pixel ctx col (+ 10 (round top) -6))))
+       (should-not (cl-loop for dy from (round (/ canvas-graph--frame-pad 2.0))
+                            to (+ (round (/ canvas-graph--frame-pad 2.0)) (canvas-graph-title-h graph) -1)
+                            thereis (canvas-graph-test--reddish-p
+                                     (canvas-cairo-pixel ctx col (+ 10 (round top) dy)))))))))
+
+(ert-deftest canvas-graph-the-legend-names-each-group-by-its-frame-colour ()
+  ;; GIVEN the sample with two groups, one with a frame colour of its own
+  ;; WHEN the legend is asked for
+  ;; THEN after the rows of the depths come the groups, each by its title
+  ;;      with an outline in its frame colour
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 4 4
+     (let* ((canvas-graph-group-colors '("blue" "green"))
+            (spec (append canvas-graph-test--sample
+                          '(:groups (("run" :title "Running" :stroke "red" :nodes ("RUN" "WAIT_ACK"))
+                                     ("stop" :nodes ("ERROR"))))))
+            (diagram (canvas-graph-test--laid-out spec ctx)))
+       (should (equal (last (canvas-diagram--legend-entries diagram) 2)
+                      '(("Running" (1.0 0.0 0.0) outline) ("stop" (0.0 1.0 0.0) outline))))))))
+
+(ert-deftest canvas-graph-on-the-ring-each-box-of-a-group-has-a-frame-of-its-own ()
+  ;; GIVEN a group of two boxes, laid out on the ring
+  ;; WHEN the frames are asked for
+  ;; THEN each box of the group has a frame of its own, as the ring has no
+  ;;      rows that keep the boxes of a group together
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 4 4
+     (let* ((canvas-graph-layout 'ring)
+            (graph (canvas-diagram-model
+                    (canvas-graph-test--laid-out
+                     (canvas-graph-test--grouped '("A" "B" "C") '(("A" "B") ("B" "C") ("C" "A"))
+                                                 '(("g" :nodes ("A" "C"))))
+                     ctx))))
+       (should (equal (canvas-graph-test--frames-of graph "g") '(("A") ("C"))))
+       (canvas-graph-test--frames-keep-to-their-boxes graph)))))
+
 ;;; canvas-graph-tests.el ends here

@@ -81,10 +81,16 @@ A spec has these keys:
 - `:edges`, a list of `(FROM TO [LABEL [POS]])`, by node names. If `FROM`
   is nil, the edge comes from any node. Two edges between the same two
   nodes become one arrow with both labels.
+- `:groups`, optional, a list of `(ID [:title TITLE] [:stroke COLOR]
+  [:fill COLOR] :nodes (NAME...))`. Each group gets a frame round its
+  nodes. The frame shows `TITLE`. A group with no title shows its `ID`.
+  The outline of the frame has the color `:stroke`, and `:fill` is the
+  background in the frame. A color is a name or `#RRGGBB`.
 
 An unknown key, an unknown node option, a spec without nodes, or an edge
-to an unknown node gives an error. canvas-graph does not draw a wrong
-graph.
+to an unknown node gives an error. A node in two groups, an unknown group
+option or a name that is no color also gives an error. canvas-graph does
+not draw a wrong graph.
 
 `canvas-graph-export` writes a spec to a PNG, SVG or PDF file. The name
 of the file selects the format. The export needs no frame, so it works in
@@ -109,6 +115,15 @@ If `canvas-graph-layout` is `layered`, the nodes go in rows by depth,
 top down. Each row is in order under the nodes that lead to it, so fewer
 arrows cross. If the layout is `ring`, the nodes go on a circle in the
 order of the spec.
+
+A group of the spec gets a frame in its color, with its title at the
+top. The legend lists each group with its color. In a row, the boxes of
+a group stand side by side. Other rows can come between the nodes of a
+group. Then the group is in parts, and each part gets a frame of its
+own. A frame never holds a box of another group. If one frame reaches
+such a box, the part gets two frames. The ring has no rows, so each box
+of a group gets a frame of its own there. The boxes in a frame keep the
+color of their depth.
 
 An arrow leaves and enters its boxes at the border. If another arrow
 comes back the other way, the arrow bows to its right. If a straight
@@ -187,6 +202,7 @@ Use `M-x customize-group RET canvas-graph`, or set the variables:
 | `canvas-graph-label-lines` | 3 | labels an arrow lists before it tells how many more |
 | `canvas-graph-fold-common` | `t` | fold the edges that most nodes share |
 | `canvas-graph-common-min` | 3 | nodes that must share an edge before it folds |
+| `canvas-graph-group-colors` | 7 colors | frame colors of the groups that give no `:stroke`, in turn |
 | `canvas-graph-panel-width` | `auto` | pixels of text in the panel, or `auto` |
 | `canvas-graph-route-turns` | `rounded` | `rounded` or `sharp` turns on a folded way |
 
