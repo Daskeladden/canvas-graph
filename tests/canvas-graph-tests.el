@@ -1595,6 +1595,14 @@ or 1, each channel within a quarter of full."
     (should (string-search "A is in g and in h" (funcall message-of '(("g" :nodes ("A")) ("h" :nodes ("A"))))))
     (should (string-search "nocolour" (funcall message-of '(("g" :stroke "nocolour" :nodes ("A"))))))))
 
+(ert-deftest canvas-graph-each-default-frame-colour-is-a-colour ()
+  ;; GIVEN the frame colours that a graph uses when the user sets none
+  ;; WHEN each name is looked up
+  ;; THEN each is a colour, so a graph with as many groups as the list has
+  ;;      draws each frame and stops at none of them
+  (let ((defaults (eval (car (get 'canvas-graph-group-colors 'standard-value)) t)))
+    (should (equal (seq-remove #'canvas-diagram-rgb defaults) nil))))
+
 (ert-deftest canvas-graph-a-row-keeps-the-boxes-of-a-group-side-by-side ()
   ;; GIVEN a start with three nodes below it, the first and the last of
   ;;       them in one group

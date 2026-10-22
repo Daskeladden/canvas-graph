@@ -116,7 +116,7 @@ the other nodes must, too."
   :type 'integer)
 
 (defcustom canvas-graph-group-colors
-  '("steel blue" "chocolate" "sea green" "medium purple" "indian red" "dark goldenrod" "teal")
+  '("steel blue" "chocolate" "sea green" "medium purple" "indian red" "dark goldenrod" "dark cyan")
   "The colours of the frames round the groups that name no colour of
 their own, taken in the order of the groups and cycled."
   :type '(repeat string))
