@@ -5,13 +5,19 @@ EMACS   ?= emacs
 DIAGRAM ?= ../canvas-diagram
 KEYS    ?= ../canvas-keys
 
-.PHONY: test module clean
+.PHONY: test acceptance module clean
 
 test: module
 	$(EMACS) -Q --batch -L . -L $(DIAGRAM) -L $(KEYS) -L tests \
 	  -l tests/canvas-graph-tests.el \
 	  -l tests/canvas-graph-dot-tests.el \
 	  --eval '(ert-run-tests-batch-and-exit)'
+
+# The real commands in a real window, on a private display.
+acceptance: module
+	timeout 120 xvfb-run -a -s "-screen 0 1400x900x24" $(EMACS) -Q \
+	  --eval '(setq load-prefer-newer t)' -L . -L $(DIAGRAM) -L $(DIAGRAM)/tests -L $(KEYS) \
+	  -l tests/canvas-graph-acceptance.el --eval '(canvas-diagram-acceptance-run "acceptance-plain-")'
 
 # The cairo and pango module lives with canvas-diagram.
 module:
