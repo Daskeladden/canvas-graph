@@ -2257,4 +2257,40 @@ arrow, or nearer to another arrow than to their own."
                    (apart (/ (abs (- (* (- ax1 ax0) (- ay0 by)) (* (- ax0 bx) (- ay1 ay0)))) len)))
         (should (< (abs (- apart (* 2 canvas-graph--pair-apart))) 1))))))
 
+;;;; Where a label goes when no place is free
+
+(ert-deftest canvas-graph-layered-a-crowded-label-goes-near-a-box-before-it-hides-an-arrow ()
+  ;; GIVEN a box in the layered layout, a place for a label that reaches
+  ;;       into the room for the arrows below the box, and a place that
+  ;;       lies over an arrow
+  ;; WHEN the two places are weighed
+  ;; THEN the place near the box is the less crowded one
+  (let* ((canvas-graph-layout 'layered)
+         (canvas-diagram-spacing 'normal)
+         (box (canvas-graph-node-create :id "A" :label "A"))
+         (arrow (mapcar (lambda (x) (cons x 75)) (number-sequence 0 100 5)))
+         (near (list 10 32 30 20))
+         (over (list 10 65 30 20)))
+    (setf (canvas-diagram-node-x box) 0 (canvas-diagram-node-y box) 0
+          (canvas-diagram-node-w box) 100 (canvas-diagram-node-h box) 30)
+    (should (canvas-graph--less-crowded-p (canvas-graph--crowding near (list box) nil arrow)
+                                          (canvas-graph--crowding over (list box) nil arrow)))))
+
+(ert-deftest canvas-graph-a-crowded-label-hides-an-arrow-before-it-hides-a-box ()
+  ;; GIVEN a box, a place for a label that lies over a corner of the box,
+  ;;       and a place that lies over an arrow
+  ;; WHEN the two places are weighed
+  ;; THEN the place over the arrow is the less crowded one, as text on a
+  ;;      box must stay readable
+  (let* ((canvas-graph-layout 'layered)
+         (canvas-diagram-spacing 'normal)
+         (box (canvas-graph-node-create :id "A" :label "A"))
+         (arrow (mapcar (lambda (x) (cons x 75)) (number-sequence 0 100 5)))
+         (on-box (list 90 20 30 20))
+         (over (list 10 65 30 20)))
+    (setf (canvas-diagram-node-x box) 0 (canvas-diagram-node-y box) 0
+          (canvas-diagram-node-w box) 100 (canvas-diagram-node-h box) 30)
+    (should (canvas-graph--less-crowded-p (canvas-graph--crowding over (list box) nil arrow)
+                                          (canvas-graph--crowding on-box (list box) nil arrow)))))
+
 ;;; canvas-graph-tests.el ends here

@@ -1911,11 +1911,23 @@ on none of TAKEN, rects, and over none of POINTS, the arrows' points."
      (max 0 (- (min (+ (nth 1 a) (nth 3 a)) (+ (nth 1 b) (nth 3 b))) (max (nth 1 a) (nth 1 b))))))
 
 (defun canvas-graph--crowding (rect nodes taken &optional points)
-  "How much of RECT lies on the boxes of NODES and the rects TAKEN, as area,
-and over POINTS, the arrows' points, as 100 for each."
-  (+ (apply #'+ (mapcar (lambda (s) (canvas-graph--overlap rect (canvas-graph--keep-out s))) nodes))
-     (* 100 (cl-count-if (lambda (p) (canvas-graph--in-box-p p rect)) points))
-     (apply #'+ (mapcar (lambda (other) (canvas-graph--overlap rect other)) taken))))
+  "How crowded RECT, (X Y W H), is, as (HIDDEN ARROW NEAR), weighed in
+that order: HIDDEN, the area of the boxes of NODES and of the rects
+TAKEN that it covers, whose text it hides; ARROW, how many of POINTS,
+the arrows' points, it covers; NEAR, the area it covers of the room the
+boxes keep clear for their arrows."
+  (let ((boxes (apply #'+ (mapcar (lambda (s) (canvas-graph--overlap rect (canvas-graph--box s))) nodes)))
+        (rooms (apply #'+ (mapcar (lambda (s) (canvas-graph--overlap rect (canvas-graph--keep-out s))) nodes))))
+    (list (+ boxes (apply #'+ (mapcar (lambda (other) (canvas-graph--overlap rect other)) taken)))
+          (cl-count-if (lambda (p) (canvas-graph--in-box-p p rect)) points)
+          (- rooms boxes))))
+
+(defun canvas-graph--less-crowded-p (a b)
+  "Whether the crowding A, as `canvas-graph--crowding' gives it, is less
+than B: less in its first part, or the same there and less in the next."
+  (cl-loop for x in a for y in b
+           when (< x y) return t
+           when (> x y) return nil))
 
 (defun canvas-graph--place-label (edge graph size taken &optional points)
   "The patch for EDGE's label of SIZE: the first of the places its arrow
@@ -1928,8 +1940,8 @@ when none is clear."
            (rects (mapcar (lambda (p) (canvas-graph--centred p size))
                           (canvas-graph--label-candidates edge graph size))))
       (or (cl-find-if (lambda (r) (canvas-graph--clear-p r nodes taken points)) rects)
-          (cl-reduce (lambda (best r) (if (< (canvas-graph--crowding r nodes taken points)
-                                             (canvas-graph--crowding best nodes taken points))
+          (cl-reduce (lambda (best r) (if (canvas-graph--less-crowded-p (canvas-graph--crowding r nodes taken points)
+                                                                (canvas-graph--crowding best nodes taken points))
                                           r best))
                      rects)))))
 
