@@ -26,3 +26,11 @@ layout-acceptance: module
 	timeout 120 xvfb-run -a -s "-screen 0 1400x900x24" $(EMACS) -Q \
 	  --eval '(setq load-prefer-newer t)' -L . -L $(DIAGRAM) -L $(KEYS) -L tests \
 	  -l tests/canvas-graph-layout-acceptance.el --eval '(canvas-graph-layout-acceptance-run)'
+
+# The background of a frame in a real theme, written with the real
+# command, on a private display.
+.PHONY: tint-acceptance
+tint-acceptance: module
+	timeout 120 xvfb-run -a -s "-screen 0 1400x900x24" $(EMACS) -Q \
+	  --eval '(setq load-prefer-newer t)' -L . -L $(DIAGRAM) -L $(KEYS) -L tests \
+	  -l tests/canvas-graph-tint-acceptance.el --eval '(canvas-graph-tint-acceptance-run)'

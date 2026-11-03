@@ -48,6 +48,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'color)
 (require 'canvas-diagram)
 (require 'canvas-diagram-reader)
 
@@ -330,8 +331,8 @@ row at all."
   "The group SPEC describes among NODES, the INDEX-th group of its graph.
 SPEC is (ID [:title TITLE] [:stroke COLOUR] [:fill COLOUR] :nodes
 \(NAME...)): its frames show TITLE, else ID, are outlined in COLOUR,
-else the INDEX-th of `canvas-graph-group-colors', and have the :fill
-colour behind them, or nothing.  Another option, or a NAME of no node,
+else the INDEX-th of `canvas-graph-group-colors', and have a tint of
+the :fill colour behind them, or nothing.  Another option, or a NAME of no node,
 is an error."
   (pcase-let ((`(,id . ,options) spec))
     (cl-loop for (key _) on options by #'cddr
@@ -2042,12 +2043,23 @@ dot, the I-th marker of its target."
     (mapcar (lambda (ig) (canvas-graph--marker-label-rect ctx graph (cdr ig) (car ig) font))
             (canvas-graph--marker-groups graph))))
 
+(defun canvas-graph--background-under (graph rect)
+  "The colour behind RECT, (X Y W H), in GRAPH: the background of the
+frame that holds its middle, else the background of the drawing."
+  (pcase-let* ((`(,x ,y ,w ,h) rect)
+               (middle (cons (+ x (/ w 2.0)) (+ y (/ h 2.0))))
+               (frame (cl-find-if (lambda (frame)
+                                    (canvas-graph--in-box-p middle (canvas-graph--frame-rect frame graph)))
+                                  (canvas-graph-frames graph))))
+    (or (and frame (canvas-graph--frame-background (canvas-graph-frame-group frame)))
+        (canvas-diagram-color :background))))
+
 (defun canvas-graph--draw-patch (ctx graph rect text font)
   "Write TEXT, a label of GRAPH marked up in its style, on RECT, an opaque
-patch of background, so no line runs through the words."
+patch of the background there, so no line runs through the words."
   (pcase-let ((`(,x ,y ,w ,h) rect))
     (canvas-cairo-rectangle ctx x y w h)
-    (canvas-diagram-set-rgb ctx (canvas-diagram-color :background))
+    (canvas-diagram-set-rgb ctx (canvas-graph--background-under graph rect))
     (canvas-cairo-fill ctx)
     (canvas-diagram-set-rgb ctx (canvas-diagram-color :text))
     (canvas-cairo-markup ctx (+ x 4) (+ y 2) (canvas-graph--markup graph text) font canvas-graph-label-width)))
@@ -2068,13 +2080,35 @@ labels are shown."
       (canvas-graph--draw-patch ctx graph (canvas-graph--marker-label-rect ctx graph group i font)
                                 (canvas-graph--marker-label graph group) font))))
 
+(defconst canvas-graph--tint-step 0.08
+  "How far the background of a frame lies from the background of the
+drawing in lightness, from 0 to 1.")
+
+(defun canvas-graph--tint (fill)
+  "FILL, (R G B), toned for the background of the drawing: its hue and
+saturation, at a lightness `canvas-graph--tint-step' from the
+background's, toward the middle.  A fill chosen for a light theme then
+shows as a faint tint in a dark theme too, and the text of the theme
+reads on it."
+  (pcase-let ((`(,hue ,saturation ,_) (apply #'color-rgb-to-hsl fill))
+              (light (nth 2 (apply #'color-rgb-to-hsl (canvas-diagram-color :background)))))
+    (color-hsl-to-rgb hue saturation (if (< light 0.5)
+                                         (+ light canvas-graph--tint-step)
+                                       (- light canvas-graph--tint-step)))))
+
+(defun canvas-graph--frame-background (group)
+  "The colour behind the frames of GROUP: the tint of its fill, or nil
+when it has none."
+  (when-let* ((fill (canvas-graph-group-fill group)))
+    (canvas-graph--tint fill)))
+
 (defun canvas-graph--draw-frame (ctx frame graph)
   "Draw FRAME of GRAPH on CTX: the background of its group, if it has
 one, and the outline in the group's colour."
   (pcase-let* ((group (canvas-graph-frame-group frame))
                (`(,x ,y ,w ,h) (canvas-graph--frame-rect frame graph))
                (pad canvas-graph--frame-pad))
-    (when-let* ((fill (canvas-graph-group-fill group)))
+    (when-let* ((fill (canvas-graph--frame-background group)))
       (canvas-diagram-rounded-rect ctx x y w h pad)
       (canvas-diagram-set-rgb ctx fill)
       (canvas-cairo-fill ctx))
@@ -2094,7 +2128,7 @@ frame's background, so no arrow runs through the words."
                (text-y (+ y (/ pad 2.0))))
     (canvas-cairo-rectangle ctx (- text-x 2) text-y (+ (canvas-graph-frame-title-w frame) 4)
                             (canvas-graph-title-h graph))
-    (canvas-diagram-set-rgb ctx (or (canvas-graph-group-fill group) (canvas-diagram-color :background)))
+    (canvas-diagram-set-rgb ctx (or (canvas-graph--frame-background group) (canvas-diagram-color :background)))
     (canvas-cairo-fill ctx)
     (canvas-diagram-set-rgb ctx (canvas-diagram-color :text))
     (canvas-cairo-text ctx text-x text-y (canvas-graph-frame-title frame) font)))

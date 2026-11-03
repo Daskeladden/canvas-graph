@@ -84,8 +84,11 @@ A spec has these keys:
 - `:groups`, optional, a list of `(ID [:title TITLE] [:stroke COLOR]
   [:fill COLOR] :nodes (NAME...))`. Each group gets a frame round its
   nodes. The frame shows `TITLE`. A group with no title shows its `ID`.
-  The outline of the frame has the color `:stroke`, and `:fill` is the
-  background in the frame. A color is a name or `#RRGGBB`.
+  The outline of the frame has the color `:stroke`. With `:fill`, the
+  frame gets a faint tint of that color as its background: the hue of
+  the color, with a lightness close to the background of the theme. So a
+  frame reads in a light and in a dark theme alike. A color is a name or
+  `#RRGGBB`.
 
 An unknown key, an unknown node option, a spec without nodes, or an edge
 to an unknown node gives an error. A node in two groups, an unknown group

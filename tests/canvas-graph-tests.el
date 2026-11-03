@@ -1729,11 +1729,11 @@ or 1, each channel within a quarter of full."
          (should (< (length shown) (length title))))))))
 
 (ert-deftest canvas-graph-render-draws-a-frame-in-its-colour-on-its-background ()
-  ;; GIVEN a box in a group with a frame colour and a background, above a
-  ;;       box in a group with no background
+  ;; GIVEN a box in a group with a frame colour and a cyan background, above
+  ;;       a box in a group with no background, on a white canvas
   ;; WHEN the graph is rendered
-  ;; THEN both frames are drawn in their colour, the background of the
-  ;;      first fills the room between its frame and its box, AND the second
+  ;; THEN both frames are drawn in their colour, a light tint of cyan fills
+  ;;      the room between the first frame and its box, AND the second
   ;;      shows the canvas background there
   (canvas-graph-test--rendering
    (canvas-graph-test--with-context ctx 400 300
@@ -1750,8 +1750,14 @@ or 1, each channel within a quarter of full."
        (pcase-let ((`(,g ,h) (canvas-graph-frames graph)))
          (should (canvas-graph-test--ink-near-p ctx (funcall left-edge g) (funcall middle g) '(1 0 1)))
          (should (canvas-graph-test--ink-near-p ctx (funcall left-edge h) (funcall middle h) '(1 0 1)))
-         (should (= (canvas-cairo-pixel ctx (funcall inside g) (funcall middle g)) #xFF00FFFF))
+         (should (canvas-graph-test--light-cyan-p (canvas-cairo-pixel ctx (funcall inside g) (funcall middle g))))
          (should (= (canvas-cairo-pixel ctx (funcall inside h) (funcall middle h)) #xFFFFFFFF)))))))
+
+(defun canvas-graph-test--light-cyan-p (argb)
+  "Whether ARGB is a light cyan: as much green as blue, less red, and
+light."
+  (let ((r (logand (ash argb -16) #xFF)) (g (logand (ash argb -8) #xFF)) (b (logand argb #xFF)))
+    (and (= g b) (< r g) (> (+ r g b) (* 3 216)))))
 
 (ert-deftest canvas-graph-the-title-of-a-frame-reads-over-an-arrow ()
   ;; GIVEN a box above a small box in a group whose title is wider than
@@ -2126,6 +2132,91 @@ arrow, or nearer to another arrow than to their own."
       (should (canvas-graph--far-p back))
       (should (cl-notany (lambda (p) (cl-some (lambda (r) (canvas-graph-test--in-rect-p p r)) rects))
                          (canvas-graph-test--arrow-points back graph))))))
+
+;;;; The background of a frame
+
+(defun canvas-graph-test--hsl (rgb)
+  "RGB, (R G B) from 0 to 1, as (HUE-IN-DEGREES SATURATION LIGHTNESS)."
+  (pcase-let ((`(,h ,s ,l) (apply #'color-rgb-to-hsl rgb)))
+    (list (* 360 h) s l)))
+
+(ert-deftest canvas-graph-a-fill-shows-as-a-faint-tint-of-the-background ()
+  ;; GIVEN a pale blue fill on a black background, and a dark blue fill on
+  ;;       a white background
+  ;; WHEN each fill is toned for its background
+  ;; THEN each keeps the hue of its fill AND lies the tint step from its
+  ;;      background in lightness
+  (let ((canvas-diagram-colors '(:background "black")))
+    (pcase-let ((`(,h ,_ ,l) (canvas-graph-test--hsl (canvas-graph--tint (canvas-diagram-rgb "#e8f0fc")))))
+      (should (< (abs (- h 218)) 2))
+      (should (< (abs (- l canvas-graph--tint-step)) 0.01))))
+  (let ((canvas-diagram-colors '(:background "white")))
+    (pcase-let ((`(,h ,_ ,l) (canvas-graph-test--hsl (canvas-graph--tint (canvas-diagram-rgb "#003366")))))
+      (should (< (abs (- h 210)) 2))
+      (should (< (abs (- l (- 1 canvas-graph--tint-step))) 0.01)))))
+
+(ert-deftest canvas-graph-a-pale-fill-stays-a-pale-tint-on-a-light-background ()
+  ;; GIVEN a pale blue fill on a white background
+  ;; WHEN the fill is toned for the background
+  ;; THEN it stays a light blue, close to white in lightness
+  (let ((canvas-diagram-colors '(:background "white")))
+    (pcase-let ((`(,h ,s ,l) (canvas-graph-test--hsl (canvas-graph--tint (canvas-diagram-rgb "#e8f0fc")))))
+      (should (< (abs (- h 218)) 2))
+      (should (> s 0.5))
+      (should (< (- 1 l) 0.12)))))
+
+(ert-deftest canvas-graph-a-grey-fill-gives-a-grey-tint ()
+  ;; GIVEN a grey fill on a black background
+  ;; WHEN the fill is toned for the background
+  ;; THEN the tint is grey too
+  (let ((canvas-diagram-colors '(:background "black")))
+    (pcase-let ((`(,r ,g ,b) (canvas-graph--tint (canvas-diagram-rgb "gray70"))))
+      (should (and (= r g) (= g b))))))
+
+(ert-deftest canvas-graph-the-title-of-a-frame-sits-on-its-tint ()
+  ;; GIVEN a group with a cyan background on a white canvas
+  ;; WHEN the graph is rendered
+  ;; THEN the patch behind the title of its frame is the same tint as the
+  ;;      inside of the frame
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 400 300
+     (let* ((diagram (canvas-graph-test--laid-out
+                      (canvas-graph-test--grouped '(("A" :label "a box wider than the title")) nil
+                                                  '(("g" :title "T" :stroke "#ff00ff" :fill "#00ffff" :nodes ("A"))))
+                      ctx))
+            (graph (canvas-diagram-model diagram))
+            (frame (car (canvas-graph-frames graph)))
+            (rect (canvas-graph--frame-rect frame graph))
+            (a (car (canvas-graph-frame-nodes frame))))
+       (canvas-diagram--render diagram ctx '(400 . 300))
+       (should (= (canvas-cairo-pixel ctx (+ 10 (round (nth 0 rect)) canvas-graph--frame-pad -1)
+                                      (+ 10 (round (nth 1 rect)) (/ canvas-graph--frame-pad 2) 1))
+                  (canvas-cairo-pixel ctx (+ 10 (floor (- (canvas-diagram-node-x a) 3)))
+                                      (+ 10 (round (canvas-diagram-middle-y a))))))))))
+
+(ert-deftest canvas-graph-a-label-in-a-frame-sits-on-its-tint ()
+  ;; GIVEN two boxes in a group with a cyan background on a white canvas,
+  ;;       joined by a labelled arrow, and a box below outside the group
+  ;; WHEN the graph is rendered with every label shown
+  ;; THEN the patch behind the label inside the frame is the tint of the
+  ;;      frame, AND the patch behind the label outside it is the canvas
+  ;;      background
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 400 400
+     (let* ((canvas-graph-show-labels 'all)
+            (diagram (canvas-graph-test--laid-out
+                      (canvas-graph-test--grouped '("A" "B" "C") '(("A" "B" "inside") ("B" "C" "outside"))
+                                                  '(("g" :stroke "#ff00ff" :fill "#00ffff" :nodes ("A" "B"))))
+                      ctx))
+            (graph (canvas-diagram-model diagram))
+            (a (canvas-graph-node-named graph "A"))
+            (corner (lambda (edge) (pcase-let ((`(,x ,y ,_ ,_) (canvas-graph-edge-label-rect edge)))
+                                     (canvas-cairo-pixel ctx (+ 10 x 1) (+ 10 y 1))))))
+       (canvas-diagram--render diagram ctx '(400 . 400))
+       (should (= (funcall corner (nth 0 (canvas-graph-edges graph)))
+                  (canvas-cairo-pixel ctx (+ 10 (floor (- (canvas-diagram-node-x a) 3)))
+                                      (+ 10 (round (canvas-diagram-middle-y a))))))
+       (should (= (funcall corner (nth 1 (canvas-graph-edges graph))) #xFFFFFFFF))))))
 
 (defun canvas-graph-test--on-border-p (point node)
   "Whether POINT lies on the border of NODE's box, within half a pixel."
