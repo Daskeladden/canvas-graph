@@ -22,6 +22,9 @@ This is a prototype.
   `canvas-cairo` module. You compile the module from C against cairo and
   pango. The canvas-diagram README tells you how.
 - transient, for the menus. transient comes with Emacs.
+- Graphviz, only for the layout `dot`. On Ubuntu, run
+  `sudo apt install graphviz`. Without it, the layout `dot` draws as
+  `layered`.
 
 ## Install
 
@@ -114,7 +117,7 @@ The color of a node comes from its depth, and the legend lists one color
 per depth. The start node has the kind `start`. A node that the start
 does not reach has the kind `unreachable`. A kind outlines its box.
 
-`canvas-graph-layout` has three values:
+`canvas-graph-layout` has four values:
 
 - `layered`, the default. The nodes go in rows by depth, top down. Each
   row is in order under the nodes that lead to it, so fewer arrows
@@ -122,6 +125,15 @@ does not reach has the kind `unreachable`. A kind outlines its box.
   apart that 22 pixels of the arrow show above and below a label.
 - `compact`. The same rows, closer together. Each label sits on its
   arrow, and the arrow bends through the middle of the label.
+- `dot`. The program `dot` of graphviz places the boxes, the labels,
+  the curves of the arrows and the frames of the groups, and
+  canvas-graph draws them in its own look. A long arrow gets a lane of
+  its own, each label gets room beside its arrow, and a group stays
+  together in one frame that no other box enters. canvas-graph runs
+  `dot` as a separate program and does not link the graphviz library,
+  which is under the Eclipse Public License 1.0. If `dot` is missing,
+  fails or takes longer than 3 seconds, the graph draws as `layered`
+  and the echo area says why.
 - `ring`. The nodes go on a circle in the order of the spec.
 
 A group of the spec gets a frame in its color, with its title at the
@@ -192,7 +204,7 @@ the menu, and `?` lists every key.
 
 The keys of the menu also work directly in the buffer:
 
-- `L` cycles the layout through layered, compact and ring.
+- `L` cycles the layout through layered, compact, dot and ring.
 - `t` cycles the labels through selected, all and none.
 - `c` turns the folding of common edges on or off.
 - `r` makes the turns of a folded way round or sharp.
@@ -209,7 +221,8 @@ Use `M-x customize-group RET canvas-graph`, or set the variables:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `canvas-graph-layout` | `layered` | rows with labels beside the arrows, `compact` rows with labels on them, or a `ring` |
+| `canvas-graph-layout` | `layered` | rows with labels beside the arrows, `compact` rows with labels on them, `dot` by graphviz, or a `ring` |
+| `canvas-graph-dot-program` | `"dot"` | the program of graphviz that the layout `dot` runs |
 | `canvas-graph-show-labels` | `auto` | `auto`, `selected`, `all` or `nil` |
 | `canvas-graph-gap-x` | 28 | pixels between the nodes in a row |
 | `canvas-graph-layered-gap-y` | 64 | pixels at least between the rows of the layered layout |

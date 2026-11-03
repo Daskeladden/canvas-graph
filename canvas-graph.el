@@ -58,11 +58,16 @@
 
 (defcustom canvas-graph-layout 'layered
   "How the nodes are placed: in rows by their distance from the start
-node, top down, as graphviz lays a graph out, or on a `ring' in
-declaration order.  The rows are `layered', with each label beside its
-arrow and room for the arrow above and below it, or `compact', with each
-label on its arrow and the arrow bent through it."
-  :type '(choice (const layered) (const compact) (const ring)))
+node, top down, as graphviz lays a graph out; by the program `dot' of
+graphviz itself; or on a `ring' in declaration order.  The rows are
+`layered', with each label beside its arrow and room for the arrow above
+and below it, or `compact', with each label on its arrow and the arrow
+bent through it.  Without graphviz, `dot' draws as `layered'."
+  :type '(choice (const layered) (const compact) (const dot) (const ring)))
+
+(defcustom canvas-graph-dot-program "dot"
+  "The program `dot' of graphviz, which the layout `dot' runs."
+  :type 'string)
 
 (defun canvas-graph--in-rows-p ()
   "Whether the layout puts the nodes in rows."
@@ -216,9 +221,11 @@ alike that are drawn once; LABEL-RECT where its label sits, (X Y W H),
 or nil for none shown; CONTROL a point, (X . Y), the arrow bends
 through, its label's middle, or nil; ROUTE the corners of its way to
 the any-node marker it is folded into, (X . Y) each, or nil when it is
-drawn.  The layout sets them.  FROM-ROW and TO-ROW name the rows of the
-two boxes the arrow joins, when it joins rows rather than whole boxes."
-  from to labels pos (bow 0) common label-rect control route from-row to-row)
+drawn; SPLINE the curve the layout `dot' gave it, (:points POINTS :tip
+TIP), or nil.  The layout sets them.  FROM-ROW and TO-ROW name the rows
+of the two boxes the arrow joins, when it joins rows rather than whole
+boxes."
+  from to labels pos (bow 0) common label-rect control route from-row to-row spline)
 
 (cl-defstruct (canvas-graph (:constructor canvas-graph-create))
   "A graph: its NAME and TYPE, its NODES in declaration order, the START
@@ -237,8 +244,10 @@ them, (R G B) each, FILL nil for none, and its NODES."
 (cl-defstruct (canvas-graph-frame (:constructor canvas-graph-frame-create))
   "A frame round a part of a GROUP: the NODES it holds, the TITLE it
 shows, the title of the group or as much of its start as has room, and
-TITLE-W, the width of that title.  The layout sets the title."
-  group nodes title (title-w 0))
+TITLE-W, the width of that title.  The layout sets the title.  RECT is
+the frame, (X Y W H), when the layout placed it itself, as `dot' does;
+else the frame is drawn round its boxes."
+  group nodes title (title-w 0) rect)
 
 (defun canvas-graph-node-named (graph name)
   "The node of GRAPH its spec calls NAME, or nil."
@@ -900,6 +909,13 @@ title that start at NEXT, 0 for none."
           (if starts (+ canvas-graph--frame-pad (canvas-graph-title-h graph)) 0))))
 
 (defun canvas-graph--frame-rect (frame graph)
+  "FRAME's rect, (X Y W H): where the layout placed it, else round its
+boxes, with room above them for the title of its group, the height of
+GRAPH's titles, and as wide as the title."
+  (or (canvas-graph-frame-rect frame)
+      (canvas-graph--frame-round-boxes frame graph)))
+
+(defun canvas-graph--frame-round-boxes (frame graph)
   "FRAME's rect, (X Y W H), round its boxes, with room above them for the
 title of its group, the height of GRAPH's titles, and as wide as the title."
   (pcase-let* ((nodes (canvas-graph-frame-nodes frame))
@@ -1071,8 +1087,28 @@ their own labels come last.  On the arrows, every arrow comes first."
       (canvas-graph--choose-bows graph)
       (canvas-graph--place-labels graph ctx font))))
 
+(defun canvas-graph--spline-pieces (spline)
+  "The cubic pieces of SPLINE, (X0 Y0 C1X C1Y C2X C2Y X1 Y1) each, from
+its points, one start and three more for each piece."
+  (let ((points (plist-get spline :points)))
+    (cl-loop for (p0 c1 c2 p1) on points by #'cdddr
+             while p1
+             collect (list (car p0) (cdr p0) (car c1) (cdr c1) (car c2) (cdr c2) (car p1) (cdr p1)))))
+
+(defun canvas-graph--spline-points (spline)
+  "Points along SPLINE, (:points POINTS :tip TIP), up to its tip."
+  (append (cl-loop for piece in (canvas-graph--spline-pieces spline)
+                   append (canvas-graph--cubic-points piece))
+          (and (plist-get spline :tip) (list (plist-get spline :tip)))))
+
 (defun canvas-graph--curve-points (edge)
   "Points along EDGE's arrow as it will be drawn, a loop's included."
+  (if-let* ((spline (canvas-graph-edge-spline edge)))
+      (canvas-graph--spline-points spline)
+    (canvas-graph--drawn-curve-points edge)))
+
+(defun canvas-graph--drawn-curve-points (edge)
+  "Points along EDGE's arrow, as the layout shaped it, a loop's included."
   (if (canvas-graph--loop-p edge)
       (canvas-graph--cubic-points (canvas-graph--loop-geometry (canvas-graph-edge-from edge)))
     (let ((curve (canvas-graph--curve edge (canvas-graph-edge-bow edge))))
@@ -1132,7 +1168,20 @@ pixels: (LEFT TOP RIGHT BOTTOM), each 0 when nothing does."
       (setf (canvas-graph-edge-control edge) (cons (+ (car through) dx) (+ (cdr through) dy))))
     (when-let* ((route (canvas-graph-edge-route edge)))
       (setf (canvas-graph-edge-route edge)
-            (mapcar (lambda (p) (cons (+ (car p) dx) (+ (cdr p) dy))) route)))))
+            (mapcar (lambda (p) (cons (+ (car p) dx) (+ (cdr p) dy))) route)))
+    (when-let* ((spline (canvas-graph-edge-spline edge)))
+      (setf (canvas-graph-edge-spline edge) (canvas-graph--shifted-spline spline dx dy))))
+  (dolist (frame (canvas-graph-frames graph))
+    (when-let* ((rect (canvas-graph-frame-rect frame)))
+      (setf (canvas-graph-frame-rect frame)
+            (list (+ (nth 0 rect) dx) (+ (nth 1 rect) dy) (nth 2 rect) (nth 3 rect))))))
+
+(defun canvas-graph--shifted-spline (spline dx dy)
+  "SPLINE, (:points POINTS :tip TIP :head HEAD), moved by DX DY."
+  (cl-flet ((move (p) (and p (cons (+ (car p) dx) (+ (cdr p) dy)))))
+    (list :points (mapcar #'move (plist-get spline :points))
+          :tip (move (plist-get spline :tip))
+          :head (plist-get spline :head))))
 
 (defun canvas-graph--normalize (graph left top)
   "Shift GRAPH so that its leftmost box sits LEFT from the origin and its
@@ -1169,7 +1218,8 @@ edges, and the frames it put round its groups."
   (dolist (edge (canvas-graph-edges graph))
     (setf (canvas-graph-edge-label-rect edge) nil
           (canvas-graph-edge-control edge) nil
-          (canvas-graph-edge-route edge) nil)))
+          (canvas-graph-edge-route edge) nil
+          (canvas-graph-edge-spline edge) nil)))
 
 (defun canvas-graph--place-boxes (graph rows ctx)
   "Place GRAPH's boxes on CTX: in ROWS, or on a ring without them."
@@ -1179,10 +1229,47 @@ edges, and the frames it put round its groups."
                                   graph (canvas-graph--label-sizer ctx graph (canvas-diagram-font)))
       (canvas-graph--place-ring (canvas-graph-nodes graph) (* 2 gap-x)))))
 
+(declare-function canvas-graph-dot-lay-out "canvas-graph-dot" (diagram ctx))
+
 (defun canvas-graph--lay-out (diagram ctx)
   "Lay DIAGRAM's graph out on CTX; the nodes in reading order.
 The drawing gets room on each side for whatever the arrows and labels
 reach past the boxes, and no more."
+  (if (eq canvas-graph-layout 'dot)
+      (canvas-graph--lay-out-with-dot diagram ctx)
+    (canvas-graph--lay-out-here diagram ctx)))
+
+(defun canvas-graph--lay-out-with-dot (diagram ctx)
+  "Lay DIAGRAM's graph out on CTX with graphviz, or as the layered layout
+does when graphviz cannot."
+  (require 'canvas-graph-dot)
+  (or (canvas-graph-dot-lay-out diagram ctx)
+      (let ((canvas-graph-layout 'layered))
+        (prog1 (canvas-graph--lay-out-here diagram ctx)
+          (canvas-graph--keep-curves (canvas-diagram-model diagram))))))
+
+(defun canvas-graph--keep-curves (graph)
+  "Give each arrow of GRAPH, as the layout shaped it, a curve of its own,
+so it is drawn so whatever layout is set when it is drawn."
+  (dolist (edge (canvas-graph-edges graph))
+    (when (canvas-graph--drawn-p edge)
+      (setf (canvas-graph-edge-spline edge) (canvas-graph--shaped-spline edge graph)))))
+
+(defun canvas-graph--shaped-spline (edge graph)
+  "EDGE's arrow in GRAPH as the layout shaped it, as a curve of one cubic
+piece with its arrowhead at its end: (:points POINTS :head t)."
+  (pcase-let ((`(,x0 ,y0 ,c1x ,c1y ,c2x ,c2y ,x1 ,y1)
+               (if (canvas-graph--loop-p edge)
+                   (canvas-graph--loop-geometry (canvas-graph-edge-from edge))
+                 (pcase-let ((`(,x0 ,y0 ,cx ,cy ,x1 ,y1) (canvas-graph--geometry edge graph)))
+                   ;; A quadratic through the control point, as a cubic.
+                   (list x0 y0 (+ x0 (* (/ 2.0 3) (- cx x0))) (+ y0 (* (/ 2.0 3) (- cy y0)))
+                         (+ x1 (* (/ 2.0 3) (- cx x1))) (+ y1 (* (/ 2.0 3) (- cy y1))) x1 y1)))))
+    (list :points (list (cons x0 y0) (cons c1x c1y) (cons c2x c2y) (cons x1 y1)) :head t)))
+
+(defun canvas-graph--lay-out-here (diagram ctx)
+  "Lay DIAGRAM's graph out on CTX in the layout set, by canvas-graph
+itself; the nodes in reading order."
   (let* ((graph (canvas-diagram-model diagram))
          (nodes (canvas-graph-nodes graph))
          (measure (canvas-diagram-measure ctx))
@@ -1660,8 +1747,32 @@ on its side."
     (canvas-cairo-close-path ctx)
     (canvas-cairo-fill ctx)))
 
+(defun canvas-graph--stroke-spline (ctx spline)
+  "Stroke SPLINE, (:points POINTS :tip TIP :head HEAD), on CTX in the
+current colour and width, with its arrowhead: from the end of the curve
+to TIP, as dot draws it, or with HEAD at the end of the curve, along
+its last piece."
+  (let ((pieces (canvas-graph--spline-pieces spline))
+        (tip (plist-get spline :tip)))
+    (canvas-cairo-new-path ctx)
+    (pcase-let ((`(,x0 ,y0 . ,_) (car pieces)))
+      (canvas-cairo-move-to ctx x0 y0))
+    (pcase-dolist (`(,_ ,_ ,c1x ,c1y ,c2x ,c2y ,x1 ,y1) pieces)
+      (canvas-cairo-curve-to ctx c1x c1y c2x c2y x1 y1))
+    (canvas-cairo-stroke ctx)
+    (pcase-let ((`(,_ ,_ ,_ ,_ ,c2x ,c2y ,x1 ,y1) (car (last pieces))))
+      (cond (tip (canvas-graph--arrowhead ctx (car tip) (cdr tip) x1 y1))
+            ((plist-get spline :head) (canvas-graph--arrowhead ctx x1 y1 c2x c2y))))))
+
 (defun canvas-graph--stroke-edge (ctx edge graph)
   "Stroke EDGE of GRAPH on CTX in the current colour and width, with its
+arrowhead: along the curve `dot' gave it, when it has one."
+  (if-let* ((spline (canvas-graph-edge-spline edge)))
+      (canvas-graph--stroke-spline ctx spline)
+    (canvas-graph--stroke-shaped ctx edge graph)))
+
+(defun canvas-graph--stroke-shaped (ctx edge graph)
+  "Stroke EDGE of GRAPH on CTX as the layout shaped it, with its
 arrowhead."
   (if (canvas-graph--loop-p edge)
       (pcase-let ((`(,x0 ,y0 ,c1x ,c1y ,c2x ,c2y ,x1 ,y1)
@@ -1992,7 +2103,15 @@ are hidden."
 
 (defun canvas-graph--label-point (edge graph)
   "Where EDGE's label or tag sits in GRAPH: at its place along the arrow,
-or right of its loop."
+halfway along the curve `dot' gave it, or right of its loop."
+  (if-let* ((spline (canvas-graph-edge-spline edge)))
+      (let ((points (canvas-graph--spline-points spline)))
+        (nth (/ (length points) 2) points))
+    (canvas-graph--shaped-label-point edge graph)))
+
+(defun canvas-graph--shaped-label-point (edge graph)
+  "Where EDGE's label or tag sits in GRAPH, as the layout shaped its
+arrow: at its place along the arrow, or right of its loop."
   (if (canvas-graph--loop-p edge)
       (let ((node (canvas-graph-edge-from edge)))
         (cons (+ (canvas-diagram-node-x node) (canvas-diagram-node-w node) canvas-graph--loop-height 6)
@@ -2593,9 +2712,9 @@ callbacks of its own in front of these with `canvas-graph-diagram'.")
 ;;;; The mode and its keys
 
 (canvas-diagram-define-setting canvas-graph-cycle-layout canvas-graph-layout
-  '(layered compact ring)
+  '(layered compact dot ring)
   "Put the nodes in rows from the start node, labels beside the arrows or
-on them, or on a ring.")
+on them, where graphviz puts them, or on a ring.")
 (defconst canvas-graph--label-cycle '(selected all nil)
   "The ways of labelling the arrows `canvas-graph-toggle-labels' goes round.")
 

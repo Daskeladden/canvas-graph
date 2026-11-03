@@ -10,6 +10,7 @@ KEYS    ?= ../canvas-keys
 test: module
 	$(EMACS) -Q --batch -L . -L $(DIAGRAM) -L $(KEYS) -L tests \
 	  -l tests/canvas-graph-tests.el \
+	  -l tests/canvas-graph-dot-tests.el \
 	  --eval '(ert-run-tests-batch-and-exit)'
 
 # The cairo and pango module lives with canvas-diagram.
@@ -34,3 +35,11 @@ tint-acceptance: module
 	timeout 120 xvfb-run -a -s "-screen 0 1400x900x24" $(EMACS) -Q \
 	  --eval '(setq load-prefer-newer t)' -L . -L $(DIAGRAM) -L $(KEYS) -L tests \
 	  -l tests/canvas-graph-tint-acceptance.el --eval '(canvas-graph-tint-acceptance-run)'
+
+# The dot layout of graphviz in a real window, on a private display.  A
+# test that needs the program dot skips itself without it.
+.PHONY: dot-acceptance
+dot-acceptance: module
+	timeout 180 xvfb-run -a -s "-screen 0 1400x900x24" $(EMACS) -Q \
+	  --eval '(setq load-prefer-newer t)' -L . -L $(DIAGRAM) -L $(KEYS) -L tests \
+	  -l tests/canvas-graph-dot-acceptance.el --eval '(canvas-graph-dot-acceptance-run)'

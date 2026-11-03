@@ -1251,14 +1251,15 @@ itself is painted."
 
 (ert-deftest canvas-graph-changing-the-layout-keeps-the-keyboard ()
   ;; GIVEN the keyboard on ERROR in a layered drawing, no labels shown
-  ;; WHEN the layout is cycled to a ring and the labels toggled round
+  ;; WHEN the layout is cycled to the next one, dot, and the labels toggled
+  ;;      round
   ;; THEN the keyboard is still on ERROR, the layout changed, AND the labels
   ;;      went from none to the selected node's, to the reader's own, all
   ;;      of them, as auto, then to none and round again
   (canvas-graph-test--in-buffer canvas-graph-test--sample '(600 . 400)
     (canvas-diagram--select (canvas-graph-test--node "ERROR"))
     (canvas-graph-cycle-layout)
-    (should (eq canvas-graph-layout 'ring))
+    (should (eq canvas-graph-layout 'dot))
     (should (equal (canvas-graph-test--selected) "ERROR"))
     (should (equal (cl-loop repeat 4 collect (progn (canvas-graph-toggle-labels) canvas-graph-show-labels))
                    '(selected auto nil selected)))))
@@ -1820,13 +1821,18 @@ light."
   ;; THEN graphs are laid out in layered rows
   (should (eq (eval (car (get 'canvas-graph-layout 'standard-value))) 'layered)))
 
-(ert-deftest canvas-graph-l-goes-round-layered-compact-and-ring ()
+(ert-deftest canvas-graph-l-goes-round-layered-compact-dot-and-ring ()
   ;; GIVEN the layered layout
-  ;; WHEN the layout is cycled three times
-  ;; THEN it is compact, then ring, then layered again
+  ;; WHEN the layout is cycled four times
+  ;; THEN it is compact, then dot, then ring, then layered again
   (let ((canvas-graph-layout 'layered))
-    (should (equal (cl-loop repeat 3 collect (progn (canvas-graph-cycle-layout) canvas-graph-layout))
-                   '(compact ring layered)))))
+    (should (equal (cl-loop repeat 4 collect (progn (canvas-graph-cycle-layout) canvas-graph-layout))
+                   '(compact dot ring layered)))))
+
+(ert-deftest canvas-graph-dot-is-the-program-of-graphviz-by-default ()
+  ;; GIVEN a fresh Emacs
+  ;; THEN the dot layout runs the program dot
+  (should (equal (eval (car (get 'canvas-graph-dot-program 'standard-value))) "dot")))
 
 (ert-deftest canvas-graph-compact-puts-the-nodes-in-rows ()
   ;; GIVEN the compact layout and an edge from A to B

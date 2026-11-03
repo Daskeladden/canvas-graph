@@ -245,19 +245,23 @@ three lines long, and a self loop.")
         (should (< x (car middle) (+ x w)))
         (should-not (canvas-graph-layout-acceptance--under-a-label-p edge))))))
 
-(ert-deftest canvas-graph-layout-acceptance-l-goes-round-three-layouts ()
+(ert-deftest canvas-graph-layout-acceptance-l-goes-round-four-layouts ()
   ;; GIVEN a graph shown with the default settings
   ;; THEN the menu names the layout layered
   ;; WHEN the user presses L
   ;; THEN the menu names compact
   ;; WHEN the user presses L again
-  ;; THEN the menu names ring
+  ;; THEN the menu names dot
   ;; WHEN the user presses L a third time
+  ;; THEN the menu names ring
+  ;; WHEN the user presses L a fourth time
   ;; THEN the menu names layered again
   (canvas-graph-layout-acceptance--with-graph canvas-graph-layout-acceptance--machine
     (should (string-match-p "\\_<layered\\_>" (canvas-graph-layout-acceptance--menu-layout)))
     (canvas-graph-layout-acceptance--press "L")
     (should (string-match-p "\\_<compact\\_>" (canvas-graph-layout-acceptance--menu-layout)))
+    (canvas-graph-layout-acceptance--press "L")
+    (should (string-match-p "\\_<dot\\_>" (canvas-graph-layout-acceptance--menu-layout)))
     (canvas-graph-layout-acceptance--press "L")
     (should (string-match-p "\\_<ring\\_>" (canvas-graph-layout-acceptance--menu-layout)))
     (canvas-graph-layout-acceptance--press "L")
