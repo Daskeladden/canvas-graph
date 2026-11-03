@@ -111,10 +111,15 @@ The color of a node comes from its depth, and the legend lists one color
 per depth. The start node has the kind `start`. A node that the start
 does not reach has the kind `unreachable`. A kind outlines its box.
 
-If `canvas-graph-layout` is `layered`, the nodes go in rows by depth,
-top down. Each row is in order under the nodes that lead to it, so fewer
-arrows cross. If the layout is `ring`, the nodes go on a circle in the
-order of the spec.
+`canvas-graph-layout` has three values:
+
+- `layered`, the default. The nodes go in rows by depth, top down. Each
+  row is in order under the nodes that lead to it, so fewer arrows
+  cross. Each label sits beside its arrow, and the rows stand far enough
+  apart that 22 pixels of the arrow show above and below a label.
+- `compact`. The same rows, closer together. Each label sits on its
+  arrow, and the arrow bends through the middle of the label.
+- `ring`. The nodes go on a circle in the order of the spec.
 
 A group of the spec gets a frame in its color, with its title at the
 top. The legend lists each group with its color. In a row, the boxes of
@@ -129,6 +134,15 @@ An arrow leaves and enters its boxes at the border. If another arrow
 comes back the other way, the arrow bows to its right. If a straight
 arrow runs through a box, the arrow bows just enough to go round it. An
 edge from a node to itself loops out of the right side of its box.
+
+In the `layered` layout, two arrows between the same boxes in rows next
+to each other run straight, 20 pixels apart, each with its label on the
+outer side. The label of an arrow between two boxes of one row sits
+above the arrow. An arrow that spans more rows bows round the labels of
+the shorter arrows where it can. In a crowded graph a long arrow can
+still pass under a label, when no bow takes it round all of them. The
+sizes in pixels are those of the normal spacing, and they grow and
+shrink with the spacing of the menu.
 
 `canvas-graph-show-labels` tells where the labels go:
 
@@ -175,7 +189,7 @@ the menu, and `?` lists every key.
 
 The keys of the menu also work directly in the buffer:
 
-- `L` cycles the layout.
+- `L` cycles the layout through layered, compact and ring.
 - `t` cycles the labels through selected, all and none.
 - `c` turns the folding of common edges on or off.
 - `r` makes the turns of a folded way round or sharp.
@@ -192,10 +206,11 @@ Use `M-x customize-group RET canvas-graph`, or set the variables:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `canvas-graph-layout` | `layered` | rows by depth, or a `ring` |
+| `canvas-graph-layout` | `layered` | rows with labels beside the arrows, `compact` rows with labels on them, or a `ring` |
 | `canvas-graph-show-labels` | `auto` | `auto`, `selected`, `all` or `nil` |
 | `canvas-graph-gap-x` | 28 | pixels between the nodes in a row |
-| `canvas-graph-gap-y` | 48 | pixels between the rows |
+| `canvas-graph-layered-gap-y` | 64 | pixels at least between the rows of the layered layout |
+| `canvas-graph-gap-y` | 48 | pixels between the rows of the compact layout |
 | `canvas-graph-bow` | 0.18 | how far a two-way arrow bows, as a fraction of its length |
 | `canvas-graph-label-width` | 260 | pixels before a label wraps |
 | `canvas-graph-label-max` | 90 | characters before an ellipsis cuts a label |

@@ -55,7 +55,7 @@
          (canvas-diagram-show-legend nil)
          (canvas-diagram-show-icons nil)
          (canvas-diagram-paper nil)
-         (canvas-graph-layout 'layered)
+         (canvas-graph-layout 'compact)
          (canvas-graph-fold-common t)
          (canvas-graph-label-width 220)
          (canvas-graph-show-labels nil))
@@ -435,11 +435,11 @@
 
 (ert-deftest canvas-graph-labels-lie-clear-of-boxes-and-each-other ()
   ;; GIVEN the sample, with its fan out of RUN and its arrows back to IDLE
-  ;; WHEN it is laid out with labels shown, in rows and on a ring
+  ;; WHEN it is laid out with labels shown, in each layout
   ;; THEN no label lies on a box AND no two labels lie on each other
   (canvas-graph-test--rendering
    (canvas-graph-test--with-context ctx 4 4
-     (dolist (layout '(layered ring))
+     (dolist (layout '(layered compact ring))
        (let* ((canvas-graph-show-labels 'all)
               (canvas-graph-layout layout)
               (diagram (canvas-graph-test--laid-out canvas-graph-test--sample ctx))
@@ -1806,5 +1806,364 @@ or 1, each channel within a quarter of full."
                      ctx))))
        (should (equal (canvas-graph-test--frames-of graph "g") '(("A") ("C"))))
        (canvas-graph-test--frames-keep-to-their-boxes graph)))))
+
+;;;; Three layouts
+
+(ert-deftest canvas-graph-layered-is-the-layout-of-a-fresh-emacs ()
+  ;; GIVEN a fresh Emacs
+  ;; THEN graphs are laid out in layered rows
+  (should (eq (eval (car (get 'canvas-graph-layout 'standard-value))) 'layered)))
+
+(ert-deftest canvas-graph-l-goes-round-layered-compact-and-ring ()
+  ;; GIVEN the layered layout
+  ;; WHEN the layout is cycled three times
+  ;; THEN it is compact, then ring, then layered again
+  (let ((canvas-graph-layout 'layered))
+    (should (equal (cl-loop repeat 3 collect (progn (canvas-graph-cycle-layout) canvas-graph-layout))
+                   '(compact ring layered)))))
+
+(ert-deftest canvas-graph-compact-puts-the-nodes-in-rows ()
+  ;; GIVEN the compact layout and an edge from A to B
+  ;; WHEN they are laid out
+  ;; THEN B stands in the row below A, the plain gap apart
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 4 4
+     (let* ((diagram (canvas-graph-test--laid-out (canvas-graph-test--spec '("A" "B") '(("A" "B"))) ctx))
+            (a (car (canvas-diagram-nodes diagram)))
+            (b (cadr (canvas-diagram-nodes diagram))))
+       (should (= (- (canvas-diagram-node-y b) (+ (canvas-diagram-node-y a) (canvas-diagram-node-h a)))
+                  canvas-graph-gap-y))))))
+
+;;;; The layered layout: labels beside the arrows
+
+(defun canvas-graph-test--row-gap (diagram upper lower)
+  "Pixels between the boxes of the nodes UPPER and LOWER, by index, of DIAGRAM."
+  (let ((a (nth upper (canvas-diagram-nodes diagram)))
+        (b (nth lower (canvas-diagram-nodes diagram))))
+    (- (canvas-diagram-node-y b) (+ (canvas-diagram-node-y a) (canvas-diagram-node-h a)))))
+
+(defmacro canvas-graph-test--layered (spec &rest body)
+  "Run BODY with `diagram' laid out from SPEC in the layered layout, every
+label shown."
+  (declare (indent 1))
+  `(canvas-graph-test--rendering
+    (canvas-graph-test--with-context ctx 4 4
+      (let* ((canvas-graph-layout 'layered)
+             (canvas-graph-show-labels 'all)
+             (diagram (canvas-graph-test--laid-out ,spec ctx)))
+        ,@body))))
+
+(ert-deftest canvas-graph-layered-rows-stand-further-apart ()
+  ;; GIVEN two nodes joined by an edge without a label
+  ;; WHEN they are laid out in the layered layout
+  ;; THEN the rows are the layered gap apart, wider than the compact one
+  (canvas-graph-test--layered (canvas-graph-test--spec '("A" "B") '(("A" "B")))
+    (should (> canvas-graph-layered-gap-y canvas-graph-gap-y))
+    (should (= (canvas-graph-test--row-gap diagram 0 1) canvas-graph-layered-gap-y))))
+
+(ert-deftest canvas-graph-layered-rows-leave-room-round-a-tall-label ()
+  ;; GIVEN two nodes joined by an edge with a label of three lines
+  ;; WHEN they are laid out in the layered layout
+  ;; THEN the rows stand apart by the label's height and the room for the
+  ;;      arrow above and below it
+  (canvas-graph-test--layered (canvas-graph-test--spec '("A" "B") '(("A" "B" "one") ("A" "B" "two") ("A" "B" "three")))
+    (let ((label (canvas-graph-edge-label-rect (car (canvas-graph-edges (canvas-diagram-model diagram))))))
+      (should (= (canvas-graph-test--row-gap diagram 0 1)
+                 (+ (nth 3 label) (* 2 canvas-graph--arrow-room)))))))
+
+;; The geometry of what the layered layout draws.
+
+(defun canvas-graph-test--arrow-points (edge graph)
+  "41 points along EDGE's arrow in GRAPH as it is drawn."
+  (let ((curve (canvas-graph--geometry edge graph)))
+    (mapcar (lambda (i) (canvas-graph--point-on curve (/ i 40.0))) (number-sequence 0 40))))
+
+(defun canvas-graph-test--in-rect-p (point rect)
+  "Whether POINT lies inside RECT, (X Y W H)."
+  (pcase-let ((`(,x ,y ,w ,h) rect))
+    (and (< x (car point) (+ x w)) (< y (cdr point) (+ y h)))))
+
+(defun canvas-graph-test--rect-distance (point rect)
+  "Pixels from POINT to the nearest point of RECT, (X Y W H)."
+  (pcase-let ((`(,x ,y ,w ,h) rect))
+    (let ((dx (max (- x (car point)) 0 (- (car point) (+ x w))))
+          (dy (max (- y (cdr point)) 0 (- (cdr point) (+ y h)))))
+      (sqrt (+ (* dx dx) (* dy dy))))))
+
+(defun canvas-graph-test--beside-own-arrow-p (edge graph)
+  "Whether EDGE's label in GRAPH lies off its arrow and no more than 12
+pixels from it."
+  (let ((rect (canvas-graph-edge-label-rect edge))
+        (points (canvas-graph-test--arrow-points edge graph)))
+    (and (cl-notany (lambda (p) (canvas-graph-test--in-rect-p p rect)) points)
+         (<= (apply #'min (mapcar (lambda (p) (canvas-graph-test--rect-distance p rect)) points)) 12))))
+
+(defun canvas-graph-test--clearance (edge)
+  "Pixels between EDGE's label and the boxes of its two ends, above and
+below it."
+  (pcase-let* ((`(,_ ,y ,_ ,h) (canvas-graph-edge-label-rect edge))
+               (upper (canvas-graph-edge-from edge))
+               (lower (canvas-graph-edge-to edge)))
+    (min (- y (+ (canvas-diagram-node-y upper) (canvas-diagram-node-h upper)))
+         (- (canvas-diagram-node-y lower) (+ y h)))))
+
+(ert-deftest canvas-graph-layered-labels-sit-beside-straight-arrows ()
+  ;; GIVEN a chain of three nodes, each edge labelled
+  ;; WHEN they are laid out in the layered layout
+  ;; THEN each arrow runs straight, bent through no label
+  ;; AND each label sits beside its own arrow, off it
+  ;; AND each label keeps the room for the arrow clear above and below it
+  (canvas-graph-test--layered (canvas-graph-test--spec '("A" "B" "C") '(("A" "B" "go") ("B" "C" "stop")))
+    (let ((graph (canvas-diagram-model diagram)))
+      (dolist (edge (canvas-graph-edges graph))
+        (should-not (canvas-graph-edge-control edge))
+        (should (canvas-graph-test--beside-own-arrow-p edge graph))
+        (should (>= (canvas-graph-test--clearance edge) canvas-graph--arrow-room))))))
+
+(ert-deftest canvas-graph-layered-labels-of-a-fan-keep-clear-of-the-boxes ()
+  ;; GIVEN a node fanning out to two in the row below, each edge labelled
+  ;; WHEN they are laid out in the layered layout
+  ;; THEN each label sits beside its own arrow and keeps the room for the
+  ;;      arrows clear above and below it
+  ;; AND the two labels do not overlap
+  (canvas-graph-test--layered (canvas-graph-test--spec '("A" "B" "C") '(("A" "B" "left way") ("A" "C" "right way")))
+    (let* ((graph (canvas-diagram-model diagram))
+           (edges (canvas-graph-edges graph)))
+      (dolist (edge edges)
+        (should (canvas-graph-test--beside-own-arrow-p edge graph))
+        (should (>= (canvas-graph-test--clearance edge) canvas-graph--arrow-room)))
+      (should (canvas-graph--apart-p (canvas-graph-edge-label-rect (nth 0 edges))
+                                     (canvas-graph-edge-label-rect (nth 1 edges)))))))
+
+(defun canvas-graph-test--straight-p (edge graph)
+  "Whether EDGE's arrow in GRAPH runs straight."
+  (pcase-let ((`(,x0 ,y0 ,cx ,cy ,x1 ,y1) (canvas-graph--geometry edge graph)))
+    (< (/ (abs (- (* (- x1 x0) (- y0 cy)) (* (- x0 cx) (- y1 y0))))
+          (max 0.001 (sqrt (+ (expt (- x1 x0) 2) (expt (- y1 y0) 2)))))
+       0.5)))
+
+(ert-deftest canvas-graph-layered-two-way-arrows-run-side-by-side ()
+  ;; GIVEN two nodes with a labelled edge each way between them
+  ;; WHEN they are laid out in the layered layout
+  ;; THEN both arrows run straight, twice the pair's distance apart
+  ;; AND each label sits beside its own arrow, on its outer side
+  (canvas-graph-test--layered (canvas-graph-test--spec '("A" "B") '(("A" "B" "go") ("B" "A" "back")))
+    (let* ((graph (canvas-diagram-model diagram))
+           (pair (sort (copy-sequence (canvas-graph-edges graph))
+                       (lambda (a b) (< (car (canvas-graph--point-on (canvas-graph--geometry a graph) 0.5))
+                                        (car (canvas-graph--point-on (canvas-graph--geometry b graph) 0.5))))))
+           (middle (lambda (e) (car (canvas-graph--point-on (canvas-graph--geometry e graph) 0.5)))))
+      (dolist (edge pair)
+        (should (canvas-graph-test--straight-p edge graph))
+        (should (canvas-graph-test--beside-own-arrow-p edge graph)))
+      (should (< (abs (- (- (funcall middle (cadr pair)) (funcall middle (car pair)))
+                         (* 2 canvas-graph--pair-apart)))
+                 0.5))
+      (pcase-let ((`(,lx ,_ ,lw ,_) (canvas-graph-edge-label-rect (car pair)))
+                  (`(,rx ,_ ,_ ,_) (canvas-graph-edge-label-rect (cadr pair))))
+        (should (<= (+ lx lw) (funcall middle (car pair))))
+        (should (>= rx (funcall middle (cadr pair))))))))
+
+(ert-deftest canvas-graph-layered-label-within-a-row-sits-above-its-arrow ()
+  ;; GIVEN two nodes side by side in one row, joined by a labelled edge
+  ;; WHEN they are laid out in the layered layout
+  ;; THEN the label sits above the arrow, over its middle, off it
+  ;; AND the row above stands clear of the label
+  (canvas-graph-test--layered (canvas-graph-test--spec '("A" "B" "C") '(("A" "B") ("A" "C") ("B" "C" "beans ground")))
+    (let* ((graph (canvas-diagram-model diagram))
+           (edge (nth 2 (canvas-graph-edges graph)))
+           (middle (canvas-graph--point-on (canvas-graph--geometry edge graph) 0.5))
+           (a (canvas-graph-node-named graph "A")))
+      (pcase-let ((`(,x ,y ,w ,h) (canvas-graph-edge-label-rect edge)))
+        (should (<= (+ y h) (cdr middle)))
+        (should (< x (car middle) (+ x w)))
+        (should (canvas-graph-test--beside-own-arrow-p edge graph))
+        (should (>= y (+ (canvas-diagram-node-y a) (canvas-diagram-node-h a) canvas-graph--arrow-room)))))))
+
+(ert-deftest canvas-graph-layered-labels-of-a-pair-within-a-row-sit-above-both ()
+  ;; GIVEN two nodes side by side in one row, with a labelled edge each
+  ;;       way between them
+  ;; WHEN they are laid out in the layered layout
+  ;; THEN both labels sit above both arrows, apart from each other
+  (canvas-graph-test--layered
+      (canvas-graph-test--spec '("A" "B" "C") '(("A" "B") ("A" "C") ("B" "C" "beans ground") ("C" "B" "grind again")))
+    (let* ((graph (canvas-diagram-model diagram))
+           (pair (last (canvas-graph-edges graph) 2))
+           (top (apply #'min (mapcar (lambda (e) (cdr (canvas-graph--point-on (canvas-graph--geometry e graph) 0.5)))
+                                     pair)))
+           (rects (mapcar #'canvas-graph-edge-label-rect pair)))
+      (dolist (rect rects)
+        (should (<= (+ (nth 1 rect) (nth 3 rect)) top)))
+      (should (canvas-graph--apart-p (car rects) (cadr rects))))))
+
+(ert-deftest canvas-graph-layered-slanted-pair-keeps-to-the-boxes-and-its-labels ()
+  ;; GIVEN a labelled edge each way between B and D, with D below and to
+  ;;       the side of B, so the two arrows slant
+  ;; WHEN they are laid out in the layered layout
+  ;; THEN each arrow starts and ends on the border of its boxes
+  ;; AND each label sits beside its own arrow, on its outer side, with
+  ;;      the room for the arrows clear above and below it
+  (canvas-graph-test--layered
+      (canvas-graph-test--spec '("A" "B" "C" "D") '(("A" "B") ("A" "C") ("B" "D" "pull request") ("D" "B" "changes asked")))
+    (let* ((graph (canvas-diagram-model diagram))
+           (b (canvas-graph-node-named graph "B"))
+           (d (canvas-graph-node-named graph "D"))
+           (down (nth 2 (canvas-graph-edges graph)))
+           (up (nth 3 (canvas-graph-edges graph)))
+           (middle (lambda (e) (car (canvas-graph--point-on (canvas-graph--geometry e graph) 0.5)))))
+      (should-not (= (canvas-diagram-middle-x b) (canvas-diagram-middle-x d)))
+      (dolist (edge (list down up))
+        (pcase-let ((`(,x0 ,y0 ,_ ,_ ,x1 ,y1) (canvas-graph--geometry edge graph)))
+          (should (canvas-graph-test--on-border-p (cons x0 y0) (canvas-graph-edge-from edge)))
+          (should (canvas-graph-test--on-border-p (cons x1 y1) (canvas-graph-edge-to edge)))))
+      (dolist (edge (list down up))
+        (should (canvas-graph-test--beside-own-arrow-p edge graph))
+        (should (>= (canvas-graph-test--clearance-between edge b d) canvas-graph--arrow-room)))
+      (pcase-let* ((`(,left ,right) (if (< (funcall middle down) (funcall middle up)) (list down up) (list up down)))
+                   (`(,lx ,_ ,lw ,_) (canvas-graph-edge-label-rect left))
+                   (`(,rx ,_ ,_ ,_) (canvas-graph-edge-label-rect right)))
+        (should (<= (+ lx lw) (funcall middle left)))
+        (should (>= rx (funcall middle right)))))))
+
+(defun canvas-graph-test--clearance-between (edge upper lower)
+  "Pixels between EDGE's label and the boxes of UPPER, above it, and LOWER,
+below it."
+  (pcase-let ((`(,_ ,y ,_ ,h) (canvas-graph-edge-label-rect edge)))
+    (min (- y (+ (canvas-diagram-node-y upper) (canvas-diagram-node-h upper)))
+         (- (canvas-diagram-node-y lower) (+ y h)))))
+
+(ert-deftest canvas-graph-layered-long-arrow-bends-round-the-labels-of-a-row ()
+  ;; GIVEN two boxes side by side in a row with labelled arrows between
+  ;;       them, and an arrow from the row below to the row above that
+  ;;       would run straight between the two boxes
+  ;; WHEN they are laid out in the layered layout
+  ;; THEN the long arrow runs under none of the labels
+  (canvas-graph-test--layered
+      (canvas-graph-test--spec '("idle" "grinding" "heating" "brewing")
+                               '(("idle" "grinding") ("idle" "heating")
+                                 ("grinding" "heating" "beans ground") ("heating" "grinding" "grind again")
+                                 ("grinding" "brewing") ("heating" "brewing") ("brewing" "idle" "cup full")))
+    (let* ((graph (canvas-diagram-model diagram))
+           (long (car (last (canvas-graph-edges graph))))
+           (rects (delq nil (mapcar #'canvas-graph-edge-label-rect (canvas-graph-edges graph)))))
+      (should (cl-notany (lambda (p) (cl-some (lambda (r) (canvas-graph-test--in-rect-p p r)) rects))
+                         (canvas-graph-test--arrow-points long graph))))))
+
+(defun canvas-graph-test--arrows-under-labels (graph)
+  "The pairs (EDGE . LABELLED) of GRAPH where EDGE's arrow runs under the
+label of LABELLED."
+  (cl-loop for edge in (canvas-graph-edges graph)
+           when (and (canvas-graph--drawn-p edge) (not (canvas-graph--loop-p edge)))
+           append (cl-loop for labelled in (canvas-graph-edges graph)
+                           for rect = (canvas-graph-edge-label-rect labelled)
+                           when (and rect (cl-some (lambda (p) (canvas-graph-test--in-rect-p p rect))
+                                                   (canvas-graph-test--arrow-points edge graph)))
+                           collect (cons (canvas-graph--labels-text edge) (canvas-graph--labels-text labelled)))))
+
+(defconst canvas-graph-test--brewer
+  '(:name "brewer" :start "standby"
+    :nodes (("standby" :label "Standby: heater off")
+            ("warming" :label "Warming up the water")
+            ("brewing" :label "Brewing, the pump runs as the recipe says"))
+    :edges (("standby" "warming" "power on with a timer")
+            ("warming" "warming" "too cold, timer tick")
+            ("warming" "brewing" "button pressed")
+            ("brewing" "warming" "cup full, pump stopped, tray removed")
+            ("brewing" "brewing" "timer tick")))
+  "A coffee machine with a start, two loops and an arrow each way between
+two states, its labels long.")
+
+(ert-deftest canvas-graph-layered-labels-keep-off-every-arrow ()
+  ;; GIVEN a coffee machine with loops and an arrow each way between two
+  ;;       states, and the demo with its fan, its pair and its loop, every
+  ;;       edge labelled
+  ;; WHEN each is laid out in the layered layout
+  ;; THEN no arrow runs under any label
+  (dolist (spec (list canvas-graph-test--brewer canvas-graph--demo))
+    (canvas-graph-test--layered spec
+      (should-not (canvas-graph-test--arrows-under-labels (canvas-diagram-model diagram))))))
+
+(defun canvas-graph-test--nearest-arrow (rect graph)
+  "The drawn arrow of GRAPH, loops aside, that comes nearest to RECT."
+  (cl-loop with best and best-distance
+           for edge in (canvas-graph-edges graph)
+           when (and (canvas-graph--drawn-p edge) (not (canvas-graph--loop-p edge)))
+           do (let ((d (apply #'min (mapcar (lambda (p) (canvas-graph-test--rect-distance p rect))
+                                           (canvas-graph-test--arrow-points edge graph)))))
+                (when (or (null best-distance) (< d best-distance))
+                  (setq best edge best-distance d)))
+           finally return best))
+
+(defun canvas-graph-test--labels-astray (graph)
+  "The labels of GRAPH, by their text, that are not beside their own
+arrow, or nearer to another arrow than to their own."
+  (cl-loop for edge in (canvas-graph-edges graph)
+           for rect = (canvas-graph-edge-label-rect edge)
+           when (and rect (not (canvas-graph--loop-p edge))
+                     (or (not (canvas-graph-test--beside-own-arrow-p edge graph))
+                         (not (eq (canvas-graph-test--nearest-arrow rect graph) edge))))
+           collect (canvas-graph--labels-text edge)))
+
+(ert-deftest canvas-graph-layered-each-label-stays-by-its-own-arrow ()
+  ;; GIVEN the coffee machine and the demo, every edge labelled
+  ;; WHEN each is laid out in the layered layout
+  ;; THEN each label sits beside its own arrow, nearer to it than to any
+  ;;      other arrow
+  (dolist (spec (list canvas-graph-test--brewer canvas-graph--demo))
+    (canvas-graph-test--layered spec
+      (should-not (canvas-graph-test--labels-astray (canvas-diagram-model diagram))))))
+
+(ert-deftest canvas-graph-layered-long-arrow-bends-round-the-labels-placed-before-it ()
+  ;; GIVEN the sample, whose arrow from ERROR back to IDLE would run past
+  ;;       the labels of RUN's fan and of the arrows between IDLE and RUN
+  ;; WHEN it is laid out in the layered layout
+  ;; THEN that long arrow runs under none of the labels
+  (canvas-graph-test--layered canvas-graph-test--sample
+    (let* ((graph (canvas-diagram-model diagram))
+           (back (cl-find-if (lambda (e) (equal (canvas-graph-node-id (canvas-graph-edge-from e)) "ERROR"))
+                             (canvas-graph-edges graph)))
+           (rects (delq nil (mapcar #'canvas-graph-edge-label-rect (canvas-graph-edges graph)))))
+      (should (canvas-graph--far-p back))
+      (should (cl-notany (lambda (p) (cl-some (lambda (r) (canvas-graph-test--in-rect-p p r)) rects))
+                         (canvas-graph-test--arrow-points back graph))))))
+
+(defun canvas-graph-test--on-border-p (point node)
+  "Whether POINT lies on the border of NODE's box, within half a pixel."
+  (pcase-let ((`(,x . ,y) point)
+              (left (canvas-diagram-node-x node)) (top (canvas-diagram-node-y node))
+              (right (+ (canvas-diagram-node-x node) (canvas-diagram-node-w node)))
+              (bottom (+ (canvas-diagram-node-y node) (canvas-diagram-node-h node))))
+    (and (<= (- left 0.5) x (+ right 0.5)) (<= (- top 0.5) y (+ bottom 0.5))
+         (or (< (abs (- x left)) 0.5) (< (abs (- x right)) 0.5)
+             (< (abs (- y top)) 0.5) (< (abs (- y bottom)) 0.5)))))
+
+(ert-deftest canvas-graph-layered-flat-pair-keeps-its-ends-on-the-boxes ()
+  ;; GIVEN a wide box above, and below it a box far to its left with an
+  ;;       arrow each way to it, so the two arrows run more across than down
+  ;; WHEN they are laid out in the layered layout
+  ;; THEN each arrow starts and ends on the border of its boxes
+  ;; AND the two arrows run straight, 20 pixels apart
+  (canvas-graph-test--layered
+      (canvas-graph-test--grouped
+       '(("ready" :label "Is each grinder ready? Check the beans and the water (new)")
+         ("wait" :label "Wait, or report the grinder")
+         ("slot" :label "Give each grinder a slot: one dose, its own offset"))
+       '(("ready" "wait" "no") ("wait" "ready") ("ready" "slot" "yes"))
+       nil)
+    (let* ((graph (canvas-diagram-model diagram))
+           (pair (list (nth 0 (canvas-graph-edges graph)) (nth 1 (canvas-graph-edges graph)))))
+      (pcase-let ((`(,x0 ,y0 ,_ ,_ ,x1 ,y1) (canvas-graph--geometry (car pair) graph)))
+        (should (> (abs (- x1 x0)) (abs (- y1 y0)))))
+      (dolist (edge pair)
+        (pcase-let ((`(,x0 ,y0 ,_ ,_ ,x1 ,y1) (canvas-graph--geometry edge graph)))
+          (should (canvas-graph-test--straight-p edge graph))
+          (should (canvas-graph-test--on-border-p (cons x0 y0) (canvas-graph-edge-from edge)))
+          (should (canvas-graph-test--on-border-p (cons x1 y1) (canvas-graph-edge-to edge)))))
+      (pcase-let* ((`(,ax0 ,ay0 ,_ ,_ ,ax1 ,ay1) (canvas-graph--geometry (car pair) graph))
+                   (`(,bx ,by) (let ((m (canvas-graph--point-on (canvas-graph--geometry (cadr pair) graph) 0.5)))
+                                 (list (car m) (cdr m))))
+                   (len (sqrt (+ (expt (- ax1 ax0) 2) (expt (- ay1 ay0) 2))))
+                   (apart (/ (abs (- (* (- ax1 ax0) (- ay0 by)) (* (- ax0 bx) (- ay1 ay0)))) len)))
+        (should (< (abs (- apart (* 2 canvas-graph--pair-apart))) 1))))))
 
 ;;; canvas-graph-tests.el ends here

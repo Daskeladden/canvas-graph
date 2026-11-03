@@ -56,10 +56,16 @@
   :group 'canvas-diagram)
 
 (defcustom canvas-graph-layout 'layered
-  "How the nodes are placed: in `layered' rows by their distance from
-the start node, top down, as graphviz lays a graph out, or on a
-`ring' in declaration order."
-  :type '(choice (const layered) (const ring)))
+  "How the nodes are placed: in rows by their distance from the start
+node, top down, as graphviz lays a graph out, or on a `ring' in
+declaration order.  The rows are `layered', with each label beside its
+arrow and room for the arrow above and below it, or `compact', with each
+label on its arrow and the arrow bent through it."
+  :type '(choice (const layered) (const compact) (const ring)))
+
+(defun canvas-graph--in-rows-p ()
+  "Whether the layout puts the nodes in rows."
+  (memq canvas-graph-layout '(layered compact)))
 
 (defcustom canvas-graph-show-labels 'auto
   "Which arrows are labelled: `auto', as the graph's reader would have
@@ -74,12 +80,26 @@ them all."
   :type 'integer)
 
 (defcustom canvas-graph-gap-y 48
-  "Pixels between rows: room for an arrow and the label beside it."
+  "Pixels between rows in the compact layout: room for an arrow and the
+label on it."
   :type 'integer)
+
+(defcustom canvas-graph-layered-gap-y 64
+  "Pixels at least between rows in the layered layout."
+  :type 'integer)
+
+(defconst canvas-graph--pair-apart 10
+  "Pixels from the middle of two arrows between the same two boxes to
+each of them, in the layered layout.")
+
+(defconst canvas-graph--arrow-room 22
+  "Pixels of arrow that show above and below a label between two rows in
+the layered layout.")
 
 (defcustom canvas-graph-bow 0.18
   "How far an arrow bows out when another comes back the other way,
-as a fraction of its length."
+as a fraction of its length.  In the layered layout two such arrows
+between neighbouring rows run straight side by side instead."
   :type 'number)
 
 (defcustom canvas-graph-label-width 260
@@ -604,6 +624,22 @@ boxes of a group side by side."
     (or (and (memq from row) (memq to next))
         (and (memq from next) (memq to row)))))
 
+(defun canvas-graph--labels-beside-p ()
+  "Whether the layout puts each label beside its arrow, not on it."
+  (eq canvas-graph-layout 'layered))
+
+(defun canvas-graph--gap-y ()
+  "Pixels at least between two rows, at the current spacing."
+  (canvas-diagram-spaced (if (canvas-graph--labels-beside-p) canvas-graph-layered-gap-y canvas-graph-gap-y)))
+
+(defun canvas-graph--label-room (size)
+  "Pixels between two rows that a label of SIZE, (W . H), between them
+needs: in the layered layout its patch and the arrow above and below
+it, else the label and a little."
+  (if (canvas-graph--labels-beside-p)
+      (+ (nth 3 (canvas-graph--patch 0 0 size)) (* 2 (canvas-diagram-spaced canvas-graph--arrow-room)))
+    (+ 12 (cdr size))))
+
 (defun canvas-graph--row-gap (row next gap-y graph label-size)
   "Pixels between ROW and NEXT: GAP-Y, or more when a label of an arrow
 between them, sized by LABEL-SIZE, needs it; and room besides for the
@@ -612,42 +648,92 @@ labels of arrows within either row that stand taller than their boxes."
             (mapcar (lambda (edge)
                       (if-let* (((canvas-graph--between-p edge row next))
                                 (size (funcall label-size edge)))
-                          (+ 12 (cdr size))
+                          (canvas-graph--label-room size)
                         0))
                     (canvas-graph-edges graph)))
-     (canvas-graph--overhang row graph label-size)
-     (canvas-graph--overhang next graph label-size)))
+     (canvas-graph--overhang row 'below graph label-size)
+     (canvas-graph--overhang next 'above graph label-size)))
 
 (defun canvas-graph--within (row graph)
   "The drawn arrows of GRAPH between two nodes of ROW."
   (cl-loop for (a . rest) on row
            append (cl-loop for b in rest append (canvas-graph--joining a b graph))))
 
-(defun canvas-graph--overhang (row graph label-size)
-  "How far the label of an arrow within ROW, on the row's middle, sticks
-out above and below the row's boxes; 0 when none does."
+(defun canvas-graph--overhang (row side graph label-size)
+  "How far the labels of arrows within ROW stick out on SIDE, `above' or
+`below', of the row's boxes; 0 when none does.  On the arrows, a label
+on the row's middle sticks out on both sides; beside them, the labels
+stacked above the arrows between two boxes stick out above only."
   (let ((tallest (apply #'max (mapcar #'canvas-diagram-node-h row))))
-    (apply #'max 0
-           (mapcar (lambda (edge)
-                     (if-let* ((size (funcall label-size edge)))
-                         (+ 6 (ceiling (/ (- (+ (cdr size) 5) tallest) 2.0)))
-                       0))
-                   (canvas-graph--within row graph)))))
+    (cond ((not (canvas-graph--labels-beside-p))
+           (apply #'max 0
+                  (mapcar (lambda (edge)
+                            (if-let* ((size (funcall label-size edge)))
+                                (+ 6 (ceiling (/ (- (+ (cdr size) 5) tallest) 2.0)))
+                              0))
+                          (canvas-graph--within row graph))))
+          ((eq side 'above)
+           (apply #'max 0
+                  (cl-loop for (a . rest) on row
+                           append (cl-loop for b in rest
+                                           collect (- (canvas-graph--stack-reach a b graph label-size)
+                                                      (/ tallest 2.0))))))
+          (t 0))))
+
+(defun canvas-graph--stack-height (edges label-size)
+  "The height of the patches of the labels of EDGES, sized by LABEL-SIZE,
+stacked 4 apart."
+  (cl-loop for edge in edges for size = (funcall label-size edge)
+           sum (+ (nth 3 (canvas-graph--patch 0 0 size)) 4)))
+
+(defun canvas-graph--stack-base (a b graph)
+  "How far above the middle of the boxes A and B, side by side, the labels
+of the arrows between them start: clear of the upper arrow of a pair."
+  (+ 4 (if (cl-some #'canvas-graph--two-way-p (canvas-graph--joining a b graph))
+           (canvas-diagram-spaced canvas-graph--pair-apart)
+         0)))
+
+(defun canvas-graph--stack-reach (a b graph label-size)
+  "How far above the middle of the boxes A and B the labels of the arrows
+between them reach; 0 for none."
+  (let ((edges (cl-remove-if-not label-size (canvas-graph--joining a b graph))))
+    (if edges
+        (+ (canvas-graph--stack-base a b graph) (canvas-graph--stack-height edges label-size))
+      0)))
 
 (defun canvas-graph--place-row-labels (row graph label-size)
-  "Give the labelled arrows between two nodes of ROW their labels, on the
-arrow between the boxes, several stacked."
+  "Give the labelled arrows between two nodes of ROW their labels, several
+stacked: above the arrows between the boxes when the labels go beside
+the arrows, else on them."
   (cl-loop for (a . rest) on row
            do (dolist (b rest)
-                (let* ((edges (cl-remove-if-not label-size (canvas-graph--joining a b graph)))
-                       (sizes (mapcar label-size edges))
-                       (total (+ (apply #'+ (mapcar (lambda (s) (+ (cdr s) 5)) sizes)) (* 4 (max 0 (1- (length edges))))))
-                       (cx (/ (+ (+ (canvas-diagram-node-x a) (canvas-diagram-node-w a)) (canvas-diagram-node-x b)) 2.0))
-                       (y (- (canvas-diagram-middle-y a) (/ total 2.0))))
-                  (cl-loop for edge in edges for size in sizes
-                           do (setf (canvas-graph-edge-label-rect edge)
-                                    (canvas-graph--centred (cons cx (+ y (/ (+ (cdr size) 5) 2.0))) size))
-                           (cl-incf y (+ (cdr size) 5 4)))))))
+                (let ((edges (cl-remove-if-not label-size (canvas-graph--joining a b graph)))
+                      (cx (/ (+ (+ (canvas-diagram-node-x a) (canvas-diagram-node-w a)) (canvas-diagram-node-x b)) 2.0)))
+                  (if (canvas-graph--labels-beside-p)
+                      (canvas-graph--stack-above edges label-size cx
+                                                 (- (canvas-diagram-middle-y a) (canvas-graph--stack-base a b graph)))
+                    (canvas-graph--stack-on edges label-size cx (canvas-diagram-middle-y a)))))))
+
+(defun canvas-graph--stack-on (edges label-size cx cy)
+  "Give EDGES, sized by LABEL-SIZE, their labels stacked on the point CX
+CY, the first on top."
+  (let* ((sizes (mapcar label-size edges))
+         (total (+ (apply #'+ (mapcar (lambda (s) (+ (cdr s) 5)) sizes)) (* 4 (max 0 (1- (length edges))))))
+         (y (- cy (/ total 2.0))))
+    (cl-loop for edge in edges for size in sizes
+             do (setf (canvas-graph-edge-label-rect edge)
+                      (canvas-graph--centred (cons cx (+ y (/ (+ (cdr size) 5) 2.0))) size))
+             (cl-incf y (+ (cdr size) 5 4)))))
+
+(defun canvas-graph--stack-above (edges label-size cx bottom)
+  "Give EDGES, sized by LABEL-SIZE, their labels stacked upward from
+BOTTOM, centred on CX, the first lowest."
+  (let ((y bottom))
+    (dolist (edge edges)
+      (let ((size (funcall label-size edge)))
+        (setf (canvas-graph-edge-label-rect edge)
+              (canvas-graph--centred (cons cx (- y (/ (cdr size) 2.0) 3)) size))
+        (cl-decf y (+ (nth 3 (canvas-graph--patch 0 0 size)) 4))))))
 
 (defun canvas-graph--joining (a b graph)
   "The drawn arrows of GRAPH between the nodes A and B, either way."
@@ -739,11 +825,13 @@ side in the gap."
                       ;; The next row's boxes must stand before the arrows to them bend.
                       (canvas-graph--place-row next next-y widest next-gaps)
                       ;; The labels between the rows keep clear of those on the rows,
-                      ;; and of the frames.
-                      (canvas-graph--place-gap-labels row next
-                                                      (+ bottom below (canvas-graph--overhang row graph label-size))
-                                                      (- next-y above (canvas-graph--overhang next graph label-size))
-                                                      graph label-size)
+                      ;; and of the frames.  Beside the arrows, they are placed
+                      ;; with the rest, once the arrows are known.
+                      (unless (canvas-graph--labels-beside-p)
+                        (canvas-graph--place-gap-labels row next
+                                                      (+ bottom below (canvas-graph--overhang row 'below graph label-size))
+                                                      (- next-y above (canvas-graph--overhang next 'above graph label-size))
+                                                      graph label-size))
                       (setq y next-y)))))))
 
 ;;;;; Frames round the groups
@@ -907,42 +995,80 @@ again with room for the frames between them."
                       (+ (* a y0) (* b c1y) (* c c2y) (* d y1)))))
             (number-sequence 0 10))))
 
-(defun canvas-graph--crossings (edge bow others)
-  "How many of OTHERS' boxes EDGE's arrow, bowed by BOW, runs through."
-  (let ((curve (canvas-graph--curve edge bow)))
-    (cl-count-if (lambda (node)
-                   (cl-some (lambda (k) (canvas-graph--inside-p (canvas-graph--point-on curve k) node 4))
-                            '(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9)))
-                 others)))
+(defun canvas-graph--crossings (edge bow others &optional labels)
+  "How many of OTHERS' boxes, and of the LABELS, rects (X Y W H), EDGE's
+arrow, bowed by BOW, runs through."
+  (let ((points (mapcar (lambda (k) (canvas-graph--point-on (canvas-graph--curve edge bow) k))
+                        '(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9))))
+    (+ (cl-count-if (lambda (node) (cl-some (lambda (p) (canvas-graph--inside-p p node 4)) points))
+                    others)
+       (cl-count-if (lambda (rect) (cl-some (lambda (p) (canvas-graph--in-box-p p rect)) points))
+                    labels))))
 
-(defun canvas-graph--clearest-bow (edge others)
+(defun canvas-graph--clearest-bow (edge others &optional labels)
   "The smallest bow, none first and right before left, that takes EDGE's
-arrow past every box of OTHERS; failing that, the one that crosses fewest."
+arrow past every box of OTHERS and every one of the LABELS, rects;
+failing that, the one that crosses fewest."
   (let* ((bow canvas-graph-bow)
          (candidates (cons 0 (cl-loop for k from 1 to 6 collect (* k bow) collect (* (- k) bow))))
-         (crossings (lambda (b) (canvas-graph--crossings edge b others))))
+         (crossings (lambda (b) (canvas-graph--crossings edge b others labels))))
     (or (cl-find-if (lambda (b) (zerop (funcall crossings b))) candidates)
         (cl-reduce (lambda (best b) (if (< (funcall crossings b) (funcall crossings best)) b best))
                    candidates))))
 
-(defun canvas-graph--choose-bow (edge nodes)
+(defun canvas-graph--choose-bow (edge nodes &optional labels)
   "The bow EDGE takes among NODES: none when it is not drawn as an arrow
 or loops; to its right when another comes back the other way; else
-none, unless a straight arrow would run through a box, when it bows
-just enough to clear it."
+none, unless a straight arrow would run through a box or one of the
+LABELS, rects placed already, when it bows just enough to clear it."
   (cond ((or (canvas-graph--loop-p edge) (not (canvas-graph--drawn-p edge))
              (canvas-graph-edge-control edge))
          0)
         ((canvas-graph--two-way-p edge) canvas-graph-bow)
         (t (canvas-graph--clearest-bow
             edge (cl-set-difference nodes (list (canvas-graph-edge-from edge)
-                                                (canvas-graph-edge-to edge)))))))
+                                                (canvas-graph-edge-to edge)))
+            labels))))
 
-(defun canvas-graph--choose-bows (graph)
-  "Decide how far each arrow of GRAPH bows, now that its boxes are placed."
+(defun canvas-graph--choose-bows (graph &optional which)
+  "Decide how far each arrow of GRAPH bows, or each that WHICH, a
+predicate of an edge, picks, now that its boxes and the labels placed
+so far are placed."
   (dolist (edge (canvas-graph-edges graph))
-    (setf (canvas-graph-edge-bow edge)
-          (canvas-graph--choose-bow edge (canvas-graph-nodes graph)))))
+    (when (or (null which) (funcall which edge))
+      (setf (canvas-graph-edge-bow edge)
+            (canvas-graph--choose-bow edge (canvas-graph-nodes graph) (canvas-graph--placed-labels graph edge))))))
+
+(defun canvas-graph--placed-labels (graph edge)
+  "The labels of GRAPH placed so far, an arrow other than EDGE's, for
+EDGE's arrow to keep out of when the labels go beside the arrows; none
+on them."
+  (when (canvas-graph--labels-beside-p)
+    (delq nil (mapcar (lambda (e) (and (not (eq e edge)) (canvas-graph-edge-label-rect e)))
+                      (canvas-graph-edges graph)))))
+
+(defun canvas-graph--long-p (edge)
+  "Whether EDGE is drawn as an arrow that spans more than one row."
+  (and (canvas-graph--drawn-p edge) (not (canvas-graph--loop-p edge)) (canvas-graph--far-p edge)))
+
+(defun canvas-graph--short-p (edge)
+  "Whether EDGE is anything but an arrow that spans more than one row."
+  (not (canvas-graph--long-p edge)))
+
+(defun canvas-graph--place-arrows-and-labels (graph ctx)
+  "Decide how GRAPH's arrows bow and where their labels go, on CTX.
+Beside the arrows, the arrows that join neighbouring rows come first,
+with their labels; the longer arrows then bow round those labels, and
+their own labels come last.  On the arrows, every arrow comes first."
+  (let ((font (canvas-diagram-font)))
+    (if (canvas-graph--labels-beside-p)
+        (progn
+          (canvas-graph--choose-bows graph #'canvas-graph--short-p)
+          (canvas-graph--place-labels graph ctx font #'canvas-graph--short-p)
+          (canvas-graph--choose-bows graph #'canvas-graph--long-p)
+          (canvas-graph--place-labels graph ctx font))
+      (canvas-graph--choose-bows graph)
+      (canvas-graph--place-labels graph ctx font))))
 
 (defun canvas-graph--curve-points (edge)
   "Points along EDGE's arrow as it will be drawn, a loop's included."
@@ -1048,7 +1174,7 @@ edges, and the frames it put round its groups."
   "Place GRAPH's boxes on CTX: in ROWS, or on a ring without them."
   (let ((gap-x (canvas-diagram-spaced canvas-graph-gap-x)))
     (if rows
-        (canvas-graph--place-rows rows gap-x (canvas-diagram-spaced canvas-graph-gap-y)
+        (canvas-graph--place-rows rows gap-x (canvas-graph--gap-y)
                                   graph (canvas-graph--label-sizer ctx graph (canvas-diagram-font)))
       (canvas-graph--place-ring (canvas-graph-nodes graph) (* 2 gap-x)))))
 
@@ -1059,7 +1185,7 @@ reach past the boxes, and no more."
   (let* ((graph (canvas-diagram-model diagram))
          (nodes (canvas-graph-nodes graph))
          (measure (canvas-diagram-measure ctx))
-         (rows (and (eq canvas-graph-layout 'layered) (canvas-graph--ordered-rows nodes))))
+         (rows (and (canvas-graph--in-rows-p) (canvas-graph--ordered-rows nodes))))
     (canvas-graph--mark-common graph)
     (canvas-graph--forget-placing graph)
     (dolist (node nodes)
@@ -1067,8 +1193,7 @@ reach past the boxes, and no more."
     (canvas-graph--place-boxes graph rows ctx)
     (when (canvas-graph-groups graph)
       (canvas-graph--frame-groups graph rows ctx))
-    (canvas-graph--choose-bows graph)
-    (canvas-graph--place-labels graph ctx (canvas-diagram-font))
+    (canvas-graph--place-arrows-and-labels graph ctx)
     (canvas-graph--route-folded graph)
     (pcase-let ((`(,left ,top ,right ,bottom) (canvas-graph--overshoot graph ctx)))
       (setf (canvas-diagram-slack diagram) (cons right bottom))
@@ -1102,7 +1227,58 @@ or, for no row, the point on its border towards CONTROL."
                                               'left 'right))
     (canvas-graph--border-point node control)))
 
+(defun canvas-graph--side-by-side-p (edge bow)
+  "Whether EDGE's arrow, bowed by BOW, runs straight beside the arrow
+that comes back: in the layered layout, between neighbouring rows or
+within a row, and between no rows of its boxes, whose places are fixed."
+  (and (canvas-graph--labels-beside-p)
+       (not (zerop bow))
+       (canvas-graph--two-way-p edge)
+       (not (canvas-graph--far-p edge))
+       (null (canvas-graph-edge-from-row edge))
+       (null (canvas-graph-edge-to-row edge))))
+
+(defun canvas-graph--exit-point (node from toward)
+  "Where the line from FROM, a point inside NODE's box, toward TOWARD
+leaves the box: (X . Y).  From a point outside the box, the line from
+its middle."
+  (if (not (canvas-graph--inside-p from node 0))
+      (canvas-graph--border-point node toward)
+    (pcase-let* ((`(,fx . ,fy) from)
+                 (dx (- (car toward) fx)) (dy (- (cdr toward) fy))
+                 (left (canvas-diagram-node-x node)) (top (canvas-diagram-node-y node))
+                 (right (+ left (canvas-diagram-node-w node))) (bottom (+ top (canvas-diagram-node-h node)))
+                 (k (min (cond ((> dx 0) (/ (- right fx) dx)) ((< dx 0) (/ (- left fx) dx)) (t 1.0e9))
+                         (cond ((> dy 0) (/ (- bottom fy) dy)) ((< dy 0) (/ (- top fy) dy)) (t 1.0e9)))))
+      (cons (+ fx (* k dx)) (+ fy (* k dy))))))
+
+(defun canvas-graph--side-by-side (edge bow)
+  "EDGE's arrow beside the one that comes back: straight, on the line
+between the middles of its boxes moved by `canvas-graph--pair-apart'
+to the side BOW bows to, from border to border: (X0 Y0 CX CY X1 Y1)."
+  (pcase-let* ((from (canvas-graph-edge-from edge))
+               (to (canvas-graph-edge-to edge))
+               (ax (canvas-diagram-middle-x from)) (ay (canvas-diagram-middle-y from))
+               (bx (canvas-diagram-middle-x to)) (by (canvas-diagram-middle-y to))
+               (dx (- bx ax)) (dy (- by ay))
+               (len (max 0.001 (sqrt (+ (* dx dx) (* dy dy)))))
+               (apart (* (if (< bow 0) -1 1) (canvas-diagram-spaced canvas-graph--pair-apart)))
+               (a (cons (+ ax (* apart (/ dy len))) (+ ay (* apart (/ (- dx) len)))))
+               (b (cons (+ bx (* apart (/ dy len))) (+ by (* apart (/ (- dx) len)))))
+               (`(,x0 . ,y0) (canvas-graph--exit-point from a b))
+               (`(,x1 . ,y1) (canvas-graph--exit-point to b a)))
+    (list x0 y0 (/ (+ x0 x1) 2.0) (/ (+ y0 y1) 2.0) x1 y1)))
+
 (defun canvas-graph--curve (edge bow)
+  "EDGE's arrow bowed by BOW: (X0 Y0 CX CY X1 Y1), from the border of its
+source, past a control point, to the border of its target.  Beside the
+arrow that comes back, as the layered layout has it, it runs straight,
+moved to the side it would bow to."
+  (if (canvas-graph--side-by-side-p edge bow)
+      (canvas-graph--side-by-side edge bow)
+    (canvas-graph--bowed edge bow)))
+
+(defun canvas-graph--bowed (edge bow)
   "EDGE's arrow bowed by BOW: (X0 Y0 CX CY X1 Y1), from the border of its
 source, past a control point, to the border of its target."
   (let* ((from (canvas-graph-edge-from edge))
@@ -1408,7 +1584,7 @@ joins neither."
   "Give every folded edge of GRAPH its way to its marker: round the boxes
 in the layered layout, straight on a ring."
   (let* ((folded (canvas-graph--folded-edges graph))
-         (grid (and folded (eq canvas-graph-layout 'layered) (canvas-graph--grid graph folded))))
+         (grid (and folded (canvas-graph--in-rows-p) (canvas-graph--grid graph folded))))
     (dolist (edge folded)
       (setf (canvas-graph-edge-route edge)
             (if grid
@@ -1597,35 +1773,124 @@ EXTRA pixels further."
                (reach (+ 4 (or extra 0) (* (abs nx) (/ (car size) 2.0)) (* (abs ny) (/ (cdr size) 2.0)))))
     (cons (+ (car point) (* nx reach)) (+ (cdr point) (* ny reach)))))
 
+(defun canvas-graph--tangent (curve k)
+  "The direction of CURVE, (X0 Y0 CX CY X1 Y1), at K: (DX . DY)."
+  (pcase-let ((`(,x0 ,y0 ,cx ,cy ,x1 ,y1) curve))
+    (cons (+ (* 2 (- 1 k) (- cx x0)) (* 2 k (- x1 cx)))
+          (+ (* 2 (- 1 k) (- cy y0)) (* 2 k (- y1 cy))))))
+
+(defun canvas-graph--across (curve k screen size extra)
+  "The middle for a label of SIZE, (W . H), beside CURVE at K, to the
+left of it for SCREEN -1 and to the right for 1: moved straight across,
+so that it stays at the height of the arrow there, far enough to clear
+the arrow and EXTRA pixels further.  An arrow that runs more across
+than down has its label above or below it instead, as
+`canvas-graph--beside' puts it."
+  (pcase-let ((point (canvas-graph--point-on curve k))
+              (`(,tx . ,ty) (canvas-graph--tangent curve k)))
+    (if (or (zerop ty) (< (abs ty) (abs tx)))
+        (canvas-graph--beside curve point screen size extra)
+      (let ((reach (+ 4 extra (/ (car size) 2.0) (* (abs (/ tx ty)) (/ (+ (cdr size) 5) 2.0)))))
+        (cons (+ (car point) (* screen reach)) (cdr point))))))
+
+(defun canvas-graph--same-gap-p (a b)
+  "Whether the arrows A and B join boxes at the same two heights."
+  (cl-flet ((heights (e) (sort (list (canvas-diagram-middle-y (canvas-graph-edge-from e))
+                                     (canvas-diagram-middle-y (canvas-graph-edge-to e)))
+                               #'<)))
+    (equal (heights a) (heights b))))
+
+(defun canvas-graph--sharing-a-box (edge graph)
+  "The drawn arrows of GRAPH, loops aside, that share a box with EDGE and
+join the same two rows, EDGE among them."
+  (let ((ends (list (canvas-graph-edge-from edge) (canvas-graph-edge-to edge))))
+    (cl-remove-if-not (lambda (e) (and (canvas-graph--drawn-p e) (not (canvas-graph--loop-p e))
+                                       (or (memq (canvas-graph-edge-from e) ends)
+                                           (memq (canvas-graph-edge-to e) ends))
+                                       (canvas-graph--same-gap-p e edge)))
+                      (canvas-graph-edges graph))))
+
+(defun canvas-graph--outer-side (edge graph curve)
+  "The side of EDGE's arrow, CURVE, its label goes to first: -1 left or 1
+right.  Away from the middle of the arrows that share a box with it, so
+the labels of a fan or of a pair stay outside it; else the side a bowed
+arrow bows to; else the right."
+  (let* ((middles (mapcar (lambda (e) (car (canvas-graph--point-on (canvas-graph--geometry e graph) 0.5)))
+                          (canvas-graph--sharing-a-box edge graph)))
+         (mean (/ (apply #'+ middles) (float (length middles))))
+         (own (car (canvas-graph--point-on curve 0.5)))
+         (bow (canvas-graph-edge-bow edge)))
+    (cond ((> (abs (- own mean)) 0.5) (if (< own mean) -1 1))
+          ((zerop bow) 1)
+          (t (* (if (< bow 0) -1 1) (if (< (cdr (canvas-graph--tangent curve 0.5)) 0) -1 1))))))
+
+(defun canvas-graph--gap-middle (edge curve)
+  "How far along EDGE's arrow, CURVE, from 0 to 1, it crosses the middle
+of the gap between its two boxes, one above the other; nil when the
+boxes overlap in height or the arrow bows, as it then has no such
+place to be found in one step."
+  (pcase-let* ((`(,x0 ,y0 ,cx ,cy ,x1 ,y1) curve)
+               (`(,upper ,lower) (sort (list (canvas-graph-edge-from edge) (canvas-graph-edge-to edge))
+                                       (lambda (a b) (< (canvas-diagram-node-y a) (canvas-diagram-node-y b)))))
+               (top (+ (canvas-diagram-node-y upper) (canvas-diagram-node-h upper)))
+               (bottom (canvas-diagram-node-y lower))
+               (straight (and (< (abs (- cx (/ (+ x0 x1) 2.0))) 0.5) (< (abs (- cy (/ (+ y0 y1) 2.0))) 0.5))))
+    (when (and straight (< top bottom) (> (abs (- y1 y0)) 1))
+      (let ((k (/ (- (/ (+ top bottom) 2.0) y0) (- y1 y0))))
+        (and (< 0 k 1) k)))))
+
 (defun canvas-graph--label-candidates (edge graph size)
-  "Where EDGE's label of SIZE might go, its middle, best first: on the
-arrow at its place, or beside a bowed arrow on the side it bows; then
-the other side, then further along the arrow, on it and beside it, and
-at last further out to either side, as far as the label is wide."
+  "Where EDGE's label of SIZE might go, its middle, best first.  Beside
+the arrows, as the layered layout has them: beside the arrow where it
+crosses the middle of the gap between its rows, then at its place, on
+its outer side first, then on the other side; then halfway and further
+along the arrow.  On
+the arrows: on the arrow at its place, or beside a bowed arrow on the
+side it bows; then the other side, then further along the arrow, on it
+and beside it, and at last further out to either side."
   (let* ((curve (canvas-graph--geometry edge graph))
          (bow (canvas-graph-edge-bow edge))
          (k (canvas-graph--label-parameter edge))
          (side (if (zerop bow) 1 bow))
          (on (lambda (k) (canvas-graph--point-on curve k)))
          (beside (lambda (k side extra) (canvas-graph--beside curve (funcall on k) side size extra))))
-    (append
-     (if (zerop bow)
-         (list (funcall on k) (funcall on 0.5) (funcall on 0.3) (funcall on 0.7))
-       (list (funcall beside k side 0) (funcall beside k (- side) 0) (funcall on k)))
-     (cl-loop for extra in (list 0 (/ (car size) 2.0) (car size))
-              append (cl-loop for k in (list k 0.3 0.7 0.15 0.85)
-                              collect (funcall beside k side extra)
-                              collect (funcall beside k (- side) extra)))
-     (list (funcall on 0.2) (funcall on 0.8)))))
+    (if (canvas-graph--labels-beside-p)
+        ;; No place further out: another arrow could run between the label
+        ;; and its own, and the label would read as the other's.
+        (let ((screen (canvas-graph--outer-side edge graph curve)))
+          (cl-loop for k in (delete-dups (delq nil (list (canvas-graph--gap-middle edge curve)
+                                                         k 0.5 0.3 0.7 0.15 0.85)))
+                   collect (canvas-graph--across curve k screen size 4)
+                   collect (canvas-graph--across curve k (- screen) size 4)))
+      (append
+       (if (zerop bow)
+           (list (funcall on k) (funcall on 0.5) (funcall on 0.3) (funcall on 0.7))
+         (list (funcall beside k side 0) (funcall beside k (- side) 0) (funcall on k)))
+       (cl-loop for extra in (list 0 (/ (car size) 2.0) (car size))
+                append (cl-loop for k in (list k 0.3 0.7 0.15 0.85)
+                                collect (funcall beside k side extra)
+                                collect (funcall beside k (- side) extra)))
+       (list (funcall on 0.2) (funcall on 0.8))))))
 
 (defun canvas-graph--apart-p (a b)
   "Whether the rects A and B, (X Y W H), do not overlap."
   (or (<= (+ (nth 0 a) (nth 2 a)) (nth 0 b)) (<= (+ (nth 0 b) (nth 2 b)) (nth 0 a))
       (<= (+ (nth 1 a) (nth 3 a)) (nth 1 b)) (<= (+ (nth 1 b) (nth 3 b)) (nth 1 a))))
 
-(defun canvas-graph--clear-p (rect nodes &optional taken)
-  "Whether RECT, (X Y W H), lies on no box of NODES and none of TAKEN, rects."
-  (and (cl-notany (lambda (s) (not (canvas-graph--apart-p rect (canvas-graph--box s)))) nodes)
+(defun canvas-graph--keep-out (node)
+  "Where no label may lie for NODE, (X Y W H): its box, and beside the
+arrows also the room for the arrows above and below it."
+  (if (canvas-graph--labels-beside-p)
+      (let ((room (canvas-diagram-spaced canvas-graph--arrow-room)))
+        (list (canvas-diagram-node-x node) (- (canvas-diagram-node-y node) room)
+              (canvas-diagram-node-w node) (+ (canvas-diagram-node-h node) (* 2 room))))
+    (canvas-graph--box node)))
+
+(defun canvas-graph--clear-p (rect nodes &optional taken points)
+  "Whether RECT, (X Y W H), lies where the boxes of NODES keep labels out,
+on none of TAKEN, rects, and over none of POINTS, the arrows' points."
+  (and (cl-notany (lambda (s) (not (canvas-graph--apart-p rect (canvas-graph--keep-out s)))) nodes)
+       (cl-notany (lambda (p) (canvas-graph--in-box-p p rect)) points)
        (cl-every (lambda (other) (canvas-graph--apart-p rect other)) taken)))
 
 (defun canvas-graph--centred (point size)
@@ -1644,38 +1909,58 @@ at last further out to either side, as far as the label is wide."
   (* (max 0 (- (min (+ (nth 0 a) (nth 2 a)) (+ (nth 0 b) (nth 2 b))) (max (nth 0 a) (nth 0 b))))
      (max 0 (- (min (+ (nth 1 a) (nth 3 a)) (+ (nth 1 b) (nth 3 b))) (max (nth 1 a) (nth 1 b))))))
 
-(defun canvas-graph--crowding (rect nodes taken)
-  "How much of RECT lies on the boxes of NODES and the rects TAKEN, as area."
-  (+ (apply #'+ (mapcar (lambda (s) (canvas-graph--overlap rect (canvas-graph--box s))) nodes))
+(defun canvas-graph--crowding (rect nodes taken &optional points)
+  "How much of RECT lies on the boxes of NODES and the rects TAKEN, as area,
+and over POINTS, the arrows' points, as 100 for each."
+  (+ (apply #'+ (mapcar (lambda (s) (canvas-graph--overlap rect (canvas-graph--keep-out s))) nodes))
+     (* 100 (cl-count-if (lambda (p) (canvas-graph--in-box-p p rect)) points))
      (apply #'+ (mapcar (lambda (other) (canvas-graph--overlap rect other)) taken))))
 
-(defun canvas-graph--place-label (edge graph size taken)
+(defun canvas-graph--place-label (edge graph size taken &optional points)
   "The patch for EDGE's label of SIZE: the first of the places its arrow
-offers that lies on no box and none of TAKEN, the patches placed
-already; the least crowded place when none is clear."
+offers that lies on no box, none of TAKEN, the patches placed already,
+and over none of POINTS, the arrows' points; the least crowded place
+when none is clear."
   (if (canvas-graph--loop-p edge)
       (canvas-graph--loop-label-rect edge size)
     (let* ((nodes (canvas-graph-nodes graph))
            (rects (mapcar (lambda (p) (canvas-graph--centred p size))
                           (canvas-graph--label-candidates edge graph size))))
-      (or (cl-find-if (lambda (r) (canvas-graph--clear-p r nodes taken)) rects)
-          (cl-reduce (lambda (best r) (if (< (canvas-graph--crowding r nodes taken)
-                                             (canvas-graph--crowding best nodes taken))
+      (or (cl-find-if (lambda (r) (canvas-graph--clear-p r nodes taken points)) rects)
+          (cl-reduce (lambda (best r) (if (< (canvas-graph--crowding r nodes taken points)
+                                             (canvas-graph--crowding best nodes taken points))
                                           r best))
                      rects)))))
 
-(defun canvas-graph--place-labels (graph ctx font)
-  "Give every drawn, labelled edge of GRAPH not yet placed by the rows its
-label's patch on CTX in FONT, each clear of the boxes and of the labels
-placed before it as far as can be; none when the labels are hidden."
+(defun canvas-graph--arrow-points (graph &optional which)
+  "Points along every arrow of GRAPH, or each that WHICH, a predicate of
+an edge, picks, loops' included, for the labels to keep off when they
+go beside the arrows; none when they go on them."
+  (when (canvas-graph--labels-beside-p)
+    (cl-loop for edge in (canvas-graph-edges graph)
+             when (and (canvas-graph--drawn-p edge) (or (null which) (funcall which edge)))
+             append (if (canvas-graph--loop-p edge)
+                        (canvas-graph--cubic-points (canvas-graph--loop-geometry (canvas-graph-edge-from edge)))
+                      (let ((curve (canvas-graph--geometry edge graph)))
+                        (mapcar (lambda (i) (canvas-graph--point-on curve (/ i 40.0)))
+                                (number-sequence 0 40)))))))
+
+(defun canvas-graph--place-labels (graph ctx font &optional which)
+  "Give every drawn, labelled edge of GRAPH not yet placed, or each that
+WHICH, a predicate of an edge, picks, its label's patch on CTX in FONT,
+each clear of the boxes, of the labels placed before it and of the
+arrows of the edges WHICH picks as far as can be; none when the labels
+are hidden."
   (let ((taken (append (delq nil (mapcar #'canvas-graph-edge-label-rect (canvas-graph-edges graph)))
-                       (canvas-graph--marker-rects graph ctx font))))
+                       (canvas-graph--marker-rects graph ctx font)))
+        (points (and (canvas-graph--all-labels-p graph) (canvas-graph--arrow-points graph which))))
     (dolist (edge (canvas-graph-edges graph))
-      (unless (canvas-graph-edge-label-rect edge)
+      (unless (or (canvas-graph-edge-label-rect edge) (and which (not (funcall which edge))))
         (setf (canvas-graph-edge-label-rect edge)
               (when-let* (((and (canvas-graph--all-labels-p graph) (canvas-graph--drawn-p edge)))
                           (text (canvas-graph--label graph edge))
-                          (rect (canvas-graph--place-label edge graph (canvas-graph--label-size ctx graph text font) taken)))
+                          (rect (canvas-graph--place-label edge graph (canvas-graph--label-size ctx graph text font)
+                                                           taken points)))
                 (push rect taken)
                 rect))))))
 
@@ -2262,7 +2547,9 @@ callbacks of its own in front of these with `canvas-graph-diagram'.")
 ;;;; The mode and its keys
 
 (canvas-diagram-define-setting canvas-graph-cycle-layout canvas-graph-layout
-  '(layered ring) "Put the nodes in rows from the start node, or on a ring.")
+  '(layered compact ring)
+  "Put the nodes in rows from the start node, labels beside the arrows or
+on them, or on a ring.")
 (defconst canvas-graph--label-cycle '(selected all nil)
   "The ways of labelling the arrows `canvas-graph-toggle-labels' goes round.")
 

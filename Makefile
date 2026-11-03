@@ -18,3 +18,11 @@ module:
 
 clean:
 	rm -f *.elc tests/*.elc
+
+# The layouts of a graph shown in a real window, with the real keys, on a
+# private display.
+.PHONY: layout-acceptance
+layout-acceptance: module
+	timeout 120 xvfb-run -a -s "-screen 0 1400x900x24" $(EMACS) -Q \
+	  --eval '(setq load-prefer-newer t)' -L . -L $(DIAGRAM) -L $(KEYS) -L tests \
+	  -l tests/canvas-graph-layout-acceptance.el --eval '(canvas-graph-layout-acceptance-run)'
