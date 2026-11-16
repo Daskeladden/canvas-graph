@@ -1754,6 +1754,28 @@ or 1, each channel within a quarter of full."
          (should (canvas-graph-test--light-cyan-p (canvas-cairo-pixel ctx (funcall inside g) (funcall middle g))))
          (should (= (canvas-cairo-pixel ctx (funcall inside h) (funcall middle h)) #xFFFFFFFF)))))))
 
+(ert-deftest canvas-graph-a-transparent-frame-draws-nothing ()
+  ;; GIVEN a group whose stroke and fill are both transparent, as a
+  ;;       mermaid subgraph that only places its boxes asks for
+  ;; WHEN the graph is rendered
+  ;; THEN it renders, AND neither an outline nor a tint shows where the
+  ;;      frame is
+  (canvas-graph-test--rendering
+   (canvas-graph-test--with-context ctx 400 300
+     (let* ((diagram (canvas-graph-test--laid-out
+                      (canvas-graph-test--grouped '("A" "B") '(("A" "B"))
+                                                  '(("g" :stroke "transparent" :fill "transparent"
+                                                     :nodes ("A"))))
+                      ctx))
+            (graph (canvas-diagram-model diagram))
+            (frame (car (canvas-graph-frames graph)))
+            (left-edge (+ 10 (round (nth 0 (canvas-graph--frame-rect frame graph)))))
+            (inside (+ 10 (floor (- (canvas-diagram-node-x (car (canvas-graph-frame-nodes frame))) 3))))
+            (middle (+ 10 (round (canvas-diagram-middle-y (car (canvas-graph-frame-nodes frame)))))))
+       (canvas-diagram--render diagram ctx '(400 . 300))
+       (should (= (canvas-cairo-pixel ctx left-edge middle) #xFFFFFFFF))
+       (should (= (canvas-cairo-pixel ctx inside middle) #xFFFFFFFF))))))
+
 (defun canvas-graph-test--light-cyan-p (argb)
   "Whether ARGB is a light cyan: as much green as blue, less red, and
 light."

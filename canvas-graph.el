@@ -238,7 +238,7 @@ of their titles."
 (cl-defstruct (canvas-graph-group (:constructor canvas-graph-group-create))
   "A group of nodes: its ID, the name the spec knows it by, the TITLE its
 frames show, the STROKE their outline is drawn in and the FILL behind
-them, (R G B) each, FILL nil for none, and its NODES."
+them, (R G B) each, nil for none, and its NODES."
   id title stroke fill nodes)
 
 (cl-defstruct (canvas-graph-frame (:constructor canvas-graph-frame-create))
@@ -336,12 +336,19 @@ row at all."
   (or (canvas-diagram-rgb name)
       (error "canvas-graph: %S is not a colour" name)))
 
+(defun canvas-graph--colour-or-none (name)
+  "(R G B) of the colour NAME, or nil for \"transparent\", which draws
+nothing, as in mermaid; another name that is no colour is an error."
+  (unless (equal name "transparent")
+    (canvas-graph--colour name)))
+
 (defun canvas-graph--group-of (spec index nodes)
   "The group SPEC describes among NODES, the INDEX-th group of its graph.
 SPEC is (ID [:title TITLE] [:stroke COLOUR] [:fill COLOUR] :nodes
 \(NAME...)): its frames show TITLE, else ID, are outlined in COLOUR,
 else the INDEX-th of `canvas-graph-group-colors', and have a tint of
-the :fill colour behind them, or nothing.  Another option, or a NAME of no node,
+the :fill colour behind them, or nothing.  A COLOUR \"transparent\"
+draws no outline or no tint.  Another option, or a NAME of no node,
 is an error."
   (pcase-let ((`(,id . ,options) spec))
     (cl-loop for (key _) on options by #'cddr
@@ -349,10 +356,10 @@ is an error."
              do (error "canvas-graph: group %s has no option %S" id key))
     (canvas-graph-group-create
      :id id :title (or (plist-get options :title) id)
-     :stroke (canvas-graph--colour
+     :stroke (canvas-graph--colour-or-none
               (or (plist-get options :stroke)
                   (nth (mod index (length canvas-graph-group-colors)) canvas-graph-group-colors)))
-     :fill (and (plist-get options :fill) (canvas-graph--colour (plist-get options :fill)))
+     :fill (and (plist-get options :fill) (canvas-graph--colour-or-none (plist-get options :fill)))
      :nodes (mapcar (lambda (name) (canvas-graph--named-in nodes name)) (plist-get options :nodes)))))
 
 (defun canvas-graph--groups (specs nodes)
@@ -2235,7 +2242,7 @@ when it has none."
 
 (defun canvas-graph--draw-frame (ctx frame graph)
   "Draw FRAME of GRAPH on CTX: the background of its group, if it has
-one, and the outline in the group's colour."
+one, and the outline in the group's colour, if it has one."
   (pcase-let* ((group (canvas-graph-frame-group frame))
                (`(,x ,y ,w ,h) (canvas-graph--frame-rect frame graph))
                (pad canvas-graph--frame-pad))
@@ -2243,11 +2250,12 @@ one, and the outline in the group's colour."
       (canvas-diagram-rounded-rect ctx x y w h pad)
       (canvas-diagram-set-rgb ctx fill)
       (canvas-cairo-fill ctx))
-    (canvas-diagram-rounded-rect ctx x y w h pad)
-    (canvas-diagram-set-rgb ctx (canvas-graph-group-stroke group))
-    ;; Two pixels wide covers a whole pixel wherever the frame falls.
-    (canvas-cairo-set-line-width ctx 2)
-    (canvas-cairo-stroke ctx)))
+    (when-let* ((stroke (canvas-graph-group-stroke group)))
+      (canvas-diagram-rounded-rect ctx x y w h pad)
+      (canvas-diagram-set-rgb ctx stroke)
+      ;; Two pixels wide covers a whole pixel wherever the frame falls.
+      (canvas-cairo-set-line-width ctx 2)
+      (canvas-cairo-stroke ctx))))
 
 (defun canvas-graph--draw-frame-title (ctx frame graph font)
   "Write the title of FRAME at its top on CTX in FONT, on a patch of the
@@ -2565,7 +2573,7 @@ colour when nothing reaches it."
 
 (defun canvas-graph--legend-entries (graph)
   "The legend's rows for GRAPH: a filled swatch per depth present, then
-an outline in the frame colour of each group, by its title."
+an outline in the frame colour of each group that has one, by its title."
   (let ((depths (sort (cl-remove-duplicates
                        (delq nil (mapcar #'canvas-graph-node-depth (canvas-graph-nodes graph))))
                       #'<)))
@@ -2573,7 +2581,7 @@ an outline in the frame colour of each group, by its title."
      (mapcar (lambda (d) (list (canvas-graph--depth-label graph d) (canvas-diagram-palette-rgb d) 'fill))
              depths)
      (mapcar (lambda (group) (list (canvas-graph-group-title group) (canvas-graph-group-stroke group) 'outline))
-             (canvas-graph-groups graph)))))
+             (seq-filter #'canvas-graph-group-stroke (canvas-graph-groups graph))))))
 
 (defun canvas-graph-header (graph node &optional place)
   "The header line of GRAPH on NODE: the graph, PLACE after its name when
